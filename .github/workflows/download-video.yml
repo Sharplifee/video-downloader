@@ -1,0 +1,31 @@
+name: Download Video
+
+on:
+  workflow_dispatch:
+    inputs:
+      url:
+        description: "Video URL to download"
+        required: true
+        type: string
+
+jobs:
+  download:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Install yt-dlp
+        run: pip install -U yt-dlp
+
+      - name: Download video
+        run: |
+          yt-dlp -t mp4 -o "video_download.mp4" \
+            --user-agent "Mozilla/5.0" \
+            --referer "${{ github.event.inputs.url }}" \
+            "${{ github.event.inputs.url }}"
+
+      - name: Upload video as artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: downloaded-video
+          path: video_download.mp4
+          retention-days: 1
+
