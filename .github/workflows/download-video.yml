@@ -25,83 +25,99 @@ jobs:
           QUALITY: ${{ github.event.inputs.quality }}
         run: |
           python3 - << 'PYEOF'
-          import requests, re, sys, os
+          import requests, re, sys, os, json, html as htmllib
 
           url = os.environ["VIDEO_URL"]
           quality = os.environ.get("QUALITY", "best").lower()
 
-          # Extract filename from URL slug
           slug = url.rstrip("/").split("/")[-1]
           filename = slug.replace("-", "_") + ".mp4"
           print(f"Output filename: {filename}")
-
-          # Write filename for next step
           with open("video_filename.txt", "w") as f:
               f.write(filename)
 
           session = requests.Session()
           headers = {
-              "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+              "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
               "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
               "Accept-Language": "en-US,en;q=0.5",
+              "Accept-Encoding": "identity",
               "Connection": "keep-alive",
           }
 
           print(f"Fetching page: {url}")
           resp = session.get(url, headers=headers)
           html = resp.text
-          print(f"Page status: {resp.status_code}")
+          print(f"Page status: {resp.status_code}, Length: {len(html)}")
 
-          mp4_urls = re.findall(r'(https?://[^\s"\'<>]+/get_file/[^\s"\'<>]+\.mp4[^\s"\'<>\/]*)', html)
-          mp4_urls = [u for u in mp4_urls if "preview" not in u and ".jpg" not in u]
-          mp4_urls = list(dict.fromkeys(mp4_urls))
+          video_url = None
 
-          print(f"Found {len(mp4_urls)} candidate URLs:")
-          for u in mp4_urls:
-              print(f"  {u}")
+          # Method 1: data-item JSON (dirtyship pattern)
+          data_items = re.findall(r'data-item=["\']({[^"\']+})["\']', html)
+          for item in data_items:
+              decoded = htmllib.unescape(item)
+              mp4s = re.findall(r'(https?:\\/\\/[^\s"\'\\]+\.mp4[^\s"\'\\]*)', decoded)
+              mp4s = [m.replace('\\/','\/').replace('\\/', '/') for m in mp4s]
+              mp4s = [re.sub(r'\\/', '/', m) for m in mp4s]
+              if mp4s:
+                  video_url = mp4s[0]
+                  print(f"Found via data-item: {video_url}")
+                  break
 
-          def res_score(u):
-              if "1440p" in u: return 4
-              if "1080p" in u: return 3
-              if "720p"  in u: return 2
-              if "360p"  in u: return 1
-              return 0
+          # Method 2: CDN direct URLs
+          if not video_url:
+              cdn_mp4s = re.findall(r'(https?://cdn[^\s"\'<>\\]+\.mp4[^\s"\'<>\\]*)', html)
+              if cdn_mp4s:
+                  video_url = cdn_mp4s[0]
+                  print(f"Found via CDN: {video_url}")
 
-          if not mp4_urls:
-              print("No MP4 URLs found")
+          # Method 3: pimpbunny get_file pattern
+          if not video_url:
+              mp4_urls = re.findall(r'(https?://[^\s"\'<>]+/get_file/[^\s"\'<>]+\.mp4[^\s"\'<>\/]*)', html)
+              mp4_urls = [u for u in mp4_urls if "preview" not in u and ".jpg" not in u]
+              mp4_urls = list(dict.fromkeys(mp4_urls))
+
+              def res_score(u):
+                  if "1440p" in u: return 4
+                  if "1080p" in u: return 3
+                  if "720p"  in u: return 2
+                  if "360p"  in u: return 1
+                  return 0
+
+              if mp4_urls:
+                  if quality == "2k":
+                      video_url = sorted(mp4_urls, key=res_score, reverse=True)[0]
+                  else:
+                      video_url = sorted(mp4_urls, key=res_score, reverse=True)[0]
+                  print(f"Found via get_file: {video_url}")
+
+          # Method 4: any mp4 on page
+          if not video_url:
+              all_mp4s = re.findall(r'(https?://[^\s"\'<>\\]+\.mp4[^\s"\'<>\\]*)', html)
+              all_mp4s = [u for u in all_mp4s if "preview" not in u and ".jpg" not in u and "screenshot" not in u]
+              if all_mp4s:
+                  video_url = all_mp4s[0]
+                  print(f"Found via generic: {video_url}")
+
+          if not video_url:
+              print("No video URL found")
               sys.exit(1)
 
-          if quality == "2k":
-              selected = sorted(mp4_urls, key=res_score, reverse=True)[0]
-          elif quality == "1080":
-              selected = sorted(mp4_urls, key=lambda u: abs(res_score(u)-3))[0]
-          elif quality == "720":
-              selected = sorted(mp4_urls, key=lambda u: abs(res_score(u)-2))[0]
-          else:
-              selected = sorted(mp4_urls, key=res_score, reverse=True)[0]
-
-          print(f"Selected ({quality}): {selected}")
-
+          print(f"Downloading: {video_url}")
           headers["Referer"] = url
-          r = session.get(selected, headers=headers, stream=True)
+          r = session.get(video_url, headers=headers, stream=True)
           print(f"Download status: {r.status_code}, Content-Type: {r.headers.get('Content-Type')}")
 
           if r.status_code != 200 or "text/html" in r.headers.get("Content-Type",""):
-              for candidate in sorted(mp4_urls, key=res_score, reverse=True):
-                  r = session.get(candidate, headers=headers, stream=True)
-                  if r.status_code == 200 and "video" in r.headers.get("Content-Type",""):
-                      print(f"Success with: {candidate}")
-                      break
-              else:
-                  print("All URLs failed")
-                  sys.exit(1)
+              print(f"Failed: {r.text[:500]}")
+              sys.exit(1)
 
           total = 0
           with open(filename, "wb") as f:
               for chunk in r.iter_content(chunk_size=65536):
                   f.write(chunk)
                   total += len(chunk)
-          print(f"Downloaded {total:,} bytes ({total/1024/1024:.1f} MB) as {filename}")
+          print(f"Downloaded {total:,} bytes ({total/1024/1024:.1f} MB)")
           PYEOF
 
       - name: Read filename
