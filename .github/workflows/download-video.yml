@@ -12,12 +12,52 @@ jobs:
   download:
     runs-on: ubuntu-latest
     steps:
-      - name: Install yt-dlp
-        run: pip install -U yt-dlp
+      - name: Install dependencies
+        run: pip install -U yt-dlp requests beautifulsoup4
 
-      - name: Download video
+      - name: Extract and download video
+        env:
+          VIDEO_URL: ${{ github.event.inputs.url }}
         run: |
-          yt-dlp -t mp4 -o "video_download.mp4" --user-agent "Mozilla/5.0" --referer "${{ github.event.inputs.url }}" "${{ github.event.inputs.url }}"
+          python3 - << 'PYEOF'
+          import requests, re, subprocess, sys, os
+
+          url = os.environ["VIDEO_URL"]
+          headers = {
+              "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+              "Referer": url
+          }
+
+          resp = requests.get(url, headers=headers)
+          html = resp.text
+
+          mp4_urls = re.findall(r'"file"\s*:\s*"(https?://[^"]+\.mp4[^"]*)"', html)
+          if not mp4_urls:
+              mp4_urls = re.findall(r"file['\"]?\s*:\s*['\"]?(https?://[^\s'\"]+\.mp4)", html)
+          if not mp4_urls:
+              mp4_urls = re.findall(r'(https?://[^\s"\'<>]+\.mp4[^\s"\'<>]*)', html)
+
+          if mp4_urls:
+              video_url = mp4_urls[0]
+              print(f"Found MP4: {video_url}")
+              r = requests.get(video_url, headers=headers, stream=True)
+              with open("video_download.mp4", "wb") as f:
+                  for chunk in r.iter_content(chunk_size=8192):
+                      f.write(chunk)
+              print("Downloaded successfully")
+          else:
+              print("No direct MP4 found, trying yt-dlp...")
+              result = subprocess.run([
+                  "yt-dlp", "-v", "--no-check-certificate",
+                  "-o", "video_download.mp4",
+                  "--user-agent", headers["User-Agent"],
+                  "--referer", url, url
+              ], capture_output=True, text=True)
+              print(result.stdout[-3000:])
+              print(result.stderr[-3000:])
+              if result.returncode != 0:
+                  sys.exit(1)
+          PYEOF
 
       - name: Upload video as artifact
         uses: actions/upload-artifact@v4
