@@ -19,13 +19,13 @@ jobs:
       - name: Install dependencies
         run: pip install -U yt-dlp requests beautifulsoup4
 
-      - name: Fetch page and download video from same IP
+      - name: Fetch page and download video
         env:
           VIDEO_URL: ${{ github.event.inputs.url }}
           QUALITY: ${{ github.event.inputs.quality }}
         run: |
           python3 - << 'PYEOF'
-          import requests, re, sys, os, json, html as htmllib
+          import requests, re, sys, os, html as htmllib
 
           url = os.environ["VIDEO_URL"]
           quality = os.environ.get("QUALITY", "best").lower()
@@ -36,8 +36,7 @@ jobs:
           with open("video_filename.txt", "w") as f:
               f.write(filename)
 
-          session = requests.Session()
-          headers = {
+          base_headers = {
               "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
               "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
               "Accept-Language": "en-US,en;q=0.5",
@@ -45,76 +44,70 @@ jobs:
               "Connection": "keep-alive",
           }
 
-          print(f"Fetching page: {url}")
-          resp = session.get(url, headers=headers)
+          session = requests.Session()
+
+          # Determine base domain for cookie seeding
+          from urllib.parse import urlparse
+          parsed = urlparse(url)
+          base_url = f"{parsed.scheme}://{parsed.netloc}"
+          session.get(base_url, headers=base_headers)
+
+          print(f"Fetching: {url}")
+          resp = session.get(url, headers={**base_headers, "Referer": base_url})
           html = resp.text
-          print(f"Page status: {resp.status_code}, Length: {len(html)}")
+          print(f"Status: {resp.status_code}, Length: {len(html)}")
 
           video_url = None
 
-          # Method 1: data-item JSON (dirtyship pattern)
-          data_items = re.findall(r'data-item=["\']({[^"\']+})["\']', html)
-          for item in data_items:
-              decoded = htmllib.unescape(item)
-              mp4s = re.findall(r'(https?:\\/\\/[^\s"\'\\]+\.mp4[^\s"\'\\]*)', decoded)
-              mp4s = [m.replace('\\/','\/').replace('\\/', '/') for m in mp4s]
-              mp4s = [re.sub(r'\\/', '/', m) for m in mp4s]
-              if mp4s:
-                  video_url = mp4s[0]
+          # Method 1: dirtyship data-item
+          fp = re.search(r'id="wpfp_[^"]*"[^>]*data-item="([^"]+)"', html)
+          if fp:
+              decoded = htmllib.unescape(fp.group(1)).replace('\\/', '/')
+              cdn = re.search(r'"src"\s*:\s*"(https?[^"]+\.mp4)"', decoded)
+              if cdn:
+                  video_url = cdn.group(1)
                   print(f"Found via data-item: {video_url}")
-                  break
 
-          # Method 2: CDN direct URLs
+          # Method 2: CDN direct mp4
           if not video_url:
               cdn_mp4s = re.findall(r'(https?://cdn[^\s"\'<>\\]+\.mp4[^\s"\'<>\\]*)', html)
+              cdn_mp4s = [u for u in cdn_mp4s if "preview" not in u]
               if cdn_mp4s:
                   video_url = cdn_mp4s[0]
                   print(f"Found via CDN: {video_url}")
 
-          # Method 3: pimpbunny get_file pattern
+          # Method 3: pimpbunny get_file - try each until one works
           if not video_url:
               mp4_urls = re.findall(r'(https?://[^\s"\'<>]+/get_file/[^\s"\'<>]+\.mp4[^\s"\'<>\/]*)', html)
               mp4_urls = [u for u in mp4_urls if "preview" not in u and ".jpg" not in u]
               mp4_urls = list(dict.fromkeys(mp4_urls))
+              print(f"Found {len(mp4_urls)} get_file candidates")
 
-              def res_score(u):
-                  if "1440p" in u: return 4
-                  if "1080p" in u: return 3
-                  if "720p"  in u: return 2
-                  if "360p"  in u: return 1
-                  return 0
-
-              if mp4_urls:
-                  if quality == "2k":
-                      video_url = sorted(mp4_urls, key=res_score, reverse=True)[0]
-                  else:
-                      video_url = sorted(mp4_urls, key=res_score, reverse=True)[0]
-                  print(f"Found via get_file: {video_url}")
-
-          # Method 4: any mp4 on page
-          if not video_url:
-              all_mp4s = re.findall(r'(https?://[^\s"\'<>\\]+\.mp4[^\s"\'<>\\]*)', html)
-              all_mp4s = [u for u in all_mp4s if "preview" not in u and ".jpg" not in u and "screenshot" not in u]
-              if all_mp4s:
-                  video_url = all_mp4s[0]
-                  print(f"Found via generic: {video_url}")
+              for candidate in mp4_urls:
+                  r = session.get(candidate, headers={**base_headers, "Referer": url}, stream=True, allow_redirects=True)
+                  ct = r.headers.get("Content-Type", "")
+                  if r.status_code == 200 and "video" in ct:
+                      video_url = candidate
+                      print(f"Working get_file URL: {candidate.split('/')[-1]} ({r.headers.get('Content-Length','?')} bytes)")
+                      r.close()
+                      break
+                  r.close()
 
           if not video_url:
               print("No video URL found")
               sys.exit(1)
 
           print(f"Downloading: {video_url}")
-          headers["Referer"] = url
-          r = session.get(video_url, headers=headers, stream=True)
-          print(f"Download status: {r.status_code}, Content-Type: {r.headers.get('Content-Type')}")
+          r = session.get(video_url, headers={**base_headers, "Referer": url}, stream=True, allow_redirects=True)
+          print(f"Status: {r.status_code}, Type: {r.headers.get('Content-Type')}, Size: {r.headers.get('Content-Length','?')} bytes")
 
-          if r.status_code != 200 or "text/html" in r.headers.get("Content-Type",""):
-              print(f"Failed: {r.text[:500]}")
+          if r.status_code != 200 or "video" not in r.headers.get("Content-Type", ""):
+              print("Download failed")
               sys.exit(1)
 
           total = 0
           with open(filename, "wb") as f:
-              for chunk in r.iter_content(chunk_size=65536):
+              for chunk in r.iter_content(chunk_size=131072):
                   f.write(chunk)
                   total += len(chunk)
           print(f"Downloaded {total:,} bytes ({total/1024/1024:.1f} MB)")
