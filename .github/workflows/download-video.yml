@@ -8,7 +8,7 @@ on:
         required: true
         type: string
       quality:
-        description: "Quality (e.g. 2k, 1080, best)"
+        description: "Quality: 2k, 1080, 720, best"
         required: false
         default: "best"
 
@@ -19,73 +19,84 @@ jobs:
       - name: Install dependencies
         run: pip install -U yt-dlp requests beautifulsoup4
 
-      - name: Extract and download video
+      - name: Fetch page and download video from same IP
         env:
           VIDEO_URL: ${{ github.event.inputs.url }}
           QUALITY: ${{ github.event.inputs.quality }}
         run: |
           python3 - << 'PYEOF'
-          import requests, re, subprocess, sys, os
+          import requests, re, sys, os
 
           url = os.environ["VIDEO_URL"]
           quality = os.environ.get("QUALITY", "best").lower()
+
+          session = requests.Session()
           headers = {
               "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-              "Referer": url
+              "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+              "Accept-Language": "en-US,en;q=0.5",
+              "Connection": "keep-alive",
           }
 
-          resp = requests.get(url, headers=headers)
+          # Step 1: Visit page with session to get IP-bound signed URLs + cookies
+          print(f"Fetching page: {url}")
+          resp = session.get(url, headers=headers)
           html = resp.text
+          print(f"Page status: {resp.status_code}, Cookies: {dict(session.cookies)}")
 
-          # Find all get_file mp4 URLs (actual video files, not previews or thumbnails)
-          mp4_urls = re.findall(r'(https?://[^\s"\'<>]+/get_file/[^\s"\'<>]+\.mp4[^\s"\'<>]*)', html)
-          if not mp4_urls:
-              mp4_urls = re.findall(r'"file"\s*:\s*"(https?://[^"]+\.mp4[^"]*)"', html)
-          if not mp4_urls:
-              mp4_urls = re.findall(r'(https?://[^\s"\'<>]+\.mp4[^\s"\'<>]*)', html)
+          # Step 2: Extract video URLs
+          mp4_urls = re.findall(r'(https?://[^\s"\'<>]+/get_file/[^\s"\'<>]+\.mp4[^\s"\'<>\/]*)', html)
+          mp4_urls = [u for u in mp4_urls if "preview" not in u and ".jpg" not in u]
+          mp4_urls = list(dict.fromkeys(mp4_urls))
 
-          # Filter out preview/thumbnail files
-          mp4_urls = [u for u in mp4_urls if "preview" not in u and ".jpg" not in u and "screenshot" not in u]
-          mp4_urls = list(dict.fromkeys(mp4_urls))  # deduplicate
-
-          print(f"Found {len(mp4_urls)} candidate MP4 URLs:")
+          print(f"Found {len(mp4_urls)} candidate URLs:")
           for u in mp4_urls:
               print(f"  {u}")
 
-          def res_priority(u):
-              if "1440p" in u or "1440" in u: return 4
-              if "1080p" in u or "1080" in u: return 3
-              if "720p" in u or "720" in u: return 2
-              if "360p" in u or "360" in u: return 1
+          def res_score(u):
+              if "1440p" in u: return 4
+              if "1080p" in u: return 3
+              if "720p"  in u: return 2
+              if "360p"  in u: return 1
               return 0
 
-          if mp4_urls:
-              if quality == "2k":
-                  # Pick 1440p if available, else highest
-                  selected = sorted(mp4_urls, key=res_priority, reverse=True)[0]
-              else:
-                  selected = mp4_urls[0]
+          if not mp4_urls:
+              print("No MP4 URLs found")
+              sys.exit(1)
 
-              print(f"Selected: {selected}")
-              r = requests.get(selected, headers=headers, stream=True)
-              total = 0
-              with open("video_download.mp4", "wb") as f:
-                  for chunk in r.iter_content(chunk_size=65536):
-                      f.write(chunk)
-                      total += len(chunk)
-              print(f"Downloaded {total} bytes successfully")
+          if quality == "2k":
+              selected = sorted(mp4_urls, key=res_score, reverse=True)[0]
+          elif quality == "1080":
+              selected = sorted(mp4_urls, key=lambda u: abs(res_score(u)-3))[0]
+          elif quality == "720":
+              selected = sorted(mp4_urls, key=lambda u: abs(res_score(u)-2))[0]
           else:
-              print("No MP4 found, falling back to yt-dlp...")
-              result = subprocess.run([
-                  "yt-dlp", "-v", "--no-check-certificate",
-                  "-o", "video_download.mp4",
-                  "--user-agent", headers["User-Agent"],
-                  "--referer", url, url
-              ], capture_output=True, text=True)
-              print(result.stdout[-3000:])
-              print(result.stderr[-3000:])
-              if result.returncode != 0:
+              selected = sorted(mp4_urls, key=res_score, reverse=True)[0]
+
+          print(f"Selected ({quality}): {selected}")
+
+          # Step 3: Download using same session (same IP, same cookies)
+          headers["Referer"] = url
+          r = session.get(selected, headers=headers, stream=True)
+          print(f"Download status: {r.status_code}, Content-Type: {r.headers.get('Content-Type')}")
+
+          if r.status_code != 200 or "text/html" in r.headers.get("Content-Type",""):
+              print("Direct URL failed, trying all URLs...")
+              for candidate in sorted(mp4_urls, key=res_score, reverse=True):
+                  r = session.get(candidate, headers=headers, stream=True)
+                  if r.status_code == 200 and "video" in r.headers.get("Content-Type",""):
+                      print(f"Success with: {candidate}")
+                      break
+              else:
+                  print("All URLs failed")
                   sys.exit(1)
+
+          total = 0
+          with open("video_download.mp4", "wb") as f:
+              for chunk in r.iter_content(chunk_size=65536):
+                  f.write(chunk)
+                  total += len(chunk)
+          print(f"Downloaded {total:,} bytes ({total/1024/1024:.1f} MB)")
           PYEOF
 
       - name: Upload video as artifact
