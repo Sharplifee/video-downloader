@@ -30,6 +30,15 @@ jobs:
           url = os.environ["VIDEO_URL"]
           quality = os.environ.get("QUALITY", "best").lower()
 
+          # Extract filename from URL slug
+          slug = url.rstrip("/").split("/")[-1]
+          filename = slug.replace("-", "_") + ".mp4"
+          print(f"Output filename: {filename}")
+
+          # Write filename for next step
+          with open("video_filename.txt", "w") as f:
+              f.write(filename)
+
           session = requests.Session()
           headers = {
               "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
@@ -38,13 +47,11 @@ jobs:
               "Connection": "keep-alive",
           }
 
-          # Step 1: Visit page with session to get IP-bound signed URLs + cookies
           print(f"Fetching page: {url}")
           resp = session.get(url, headers=headers)
           html = resp.text
-          print(f"Page status: {resp.status_code}, Cookies: {dict(session.cookies)}")
+          print(f"Page status: {resp.status_code}")
 
-          # Step 2: Extract video URLs
           mp4_urls = re.findall(r'(https?://[^\s"\'<>]+/get_file/[^\s"\'<>]+\.mp4[^\s"\'<>\/]*)', html)
           mp4_urls = [u for u in mp4_urls if "preview" not in u and ".jpg" not in u]
           mp4_urls = list(dict.fromkeys(mp4_urls))
@@ -75,13 +82,11 @@ jobs:
 
           print(f"Selected ({quality}): {selected}")
 
-          # Step 3: Download using same session (same IP, same cookies)
           headers["Referer"] = url
           r = session.get(selected, headers=headers, stream=True)
           print(f"Download status: {r.status_code}, Content-Type: {r.headers.get('Content-Type')}")
 
           if r.status_code != 200 or "text/html" in r.headers.get("Content-Type",""):
-              print("Direct URL failed, trying all URLs...")
               for candidate in sorted(mp4_urls, key=res_score, reverse=True):
                   r = session.get(candidate, headers=headers, stream=True)
                   if r.status_code == 200 and "video" in r.headers.get("Content-Type",""):
@@ -92,16 +97,20 @@ jobs:
                   sys.exit(1)
 
           total = 0
-          with open("video_download.mp4", "wb") as f:
+          with open(filename, "wb") as f:
               for chunk in r.iter_content(chunk_size=65536):
                   f.write(chunk)
                   total += len(chunk)
-          print(f"Downloaded {total:,} bytes ({total/1024/1024:.1f} MB)")
+          print(f"Downloaded {total:,} bytes ({total/1024/1024:.1f} MB) as {filename}")
           PYEOF
+
+      - name: Read filename
+        id: vars
+        run: echo "filename=$(cat video_filename.txt)" >> $GITHUB_OUTPUT
 
       - name: Upload video as artifact
         uses: actions/upload-artifact@v4
         with:
-          name: downloaded-video
-          path: video_download.mp4
+          name: ${{ steps.vars.outputs.filename }}
+          path: ${{ steps.vars.outputs.filename }}
           retention-days: 1
