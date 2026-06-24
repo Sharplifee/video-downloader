@@ -7,6 +7,10 @@ on:
         description: "Video URL to download"
         required: true
         type: string
+      quality:
+        description: "Quality (e.g. 2k, 1080, best)"
+        required: false
+        default: "best"
 
 jobs:
   download:
@@ -18,11 +22,13 @@ jobs:
       - name: Extract and download video
         env:
           VIDEO_URL: ${{ github.event.inputs.url }}
+          QUALITY: ${{ github.event.inputs.quality }}
         run: |
           python3 - << 'PYEOF'
           import requests, re, subprocess, sys, os
 
           url = os.environ["VIDEO_URL"]
+          quality = os.environ.get("QUALITY", "best").lower()
           headers = {
               "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
               "Referer": url
@@ -31,24 +37,45 @@ jobs:
           resp = requests.get(url, headers=headers)
           html = resp.text
 
+          # Find all mp4 URLs
           mp4_urls = re.findall(r'"file"\s*:\s*"(https?://[^"]+\.mp4[^"]*)"', html)
           if not mp4_urls:
               mp4_urls = re.findall(r"file['\"]?\s*:\s*['\"]?(https?://[^\s'\"]+\.mp4)", html)
           if not mp4_urls:
               mp4_urls = re.findall(r'(https?://[^\s"\'<>]+\.mp4[^\s"\'<>]*)', html)
 
+          print(f"Found {len(mp4_urls)} MP4 URLs:")
+          for u in mp4_urls:
+              print(f"  {u}")
+
           if mp4_urls:
-              video_url = mp4_urls[0]
-              print(f"Found MP4: {video_url}")
-              r = requests.get(video_url, headers=headers, stream=True)
+              # Try to pick 2K (2160 or 1440) if requested
+              selected = mp4_urls[0]
+              if quality == "2k":
+                  for u in mp4_urls:
+                      if any(r in u for r in ["2160", "1440", "2k", "4k"]):
+                          selected = u
+                          break
+                  else:
+                      # Pick highest resolution available by sorting
+                      selected = mp4_urls[-1]
+
+              print(f"Downloading: {selected}")
+              r = requests.get(selected, headers=headers, stream=True)
               with open("video_download.mp4", "wb") as f:
                   for chunk in r.iter_content(chunk_size=8192):
                       f.write(chunk)
               print("Downloaded successfully")
           else:
-              print("No direct MP4 found, trying yt-dlp...")
+              print("No direct MP4 found, trying yt-dlp with quality selector...")
+              if quality == "2k":
+                  fmt = "bestvideo[height>=1440]+bestaudio/bestvideo[height>=1080]+bestaudio/best"
+              else:
+                  fmt = "bestvideo+bestaudio/best"
               result = subprocess.run([
                   "yt-dlp", "-v", "--no-check-certificate",
+                  "-f", fmt,
+                  "--merge-output-format", "mp4",
                   "-o", "video_download.mp4",
                   "--user-agent", headers["User-Agent"],
                   "--referer", url, url
