@@ -40,20 +40,25 @@ jobs:
           with open("video_filename.txt", "w") as f:
               f.write(filename)
 
-          # YouTube and other yt-dlp supported sites
+          is_youtube = "youtube.com" in url or "youtu.be" in url
+
           if quality == "audio":
               result = subprocess.run([
                   "yt-dlp", "-x", "--audio-format", "mp3", "--audio-quality", "0",
+                  "--extractor-args", "youtube:player_client=ios,web",
+                  "--no-check-certificates",
                   "-o", filename, url
               ], capture_output=True, text=True)
               print(result.stdout)
               print(result.stderr)
               if result.returncode != 0:
                   sys.exit(1)
-          elif "youtube.com" in url or "youtu.be" in url:
+          elif is_youtube:
               result = subprocess.run([
                   "yt-dlp", "-f", "bestvideo+bestaudio/best",
                   "--merge-output-format", "mp4",
+                  "--extractor-args", "youtube:player_client=ios,web",
+                  "--no-check-certificates",
                   "-o", filename, url
               ], capture_output=True, text=True)
               print(result.stdout)
