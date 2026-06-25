@@ -8,7 +8,7 @@ on:
         required: true
         type: string
       quality:
-        description: "Quality: 2k, 1080, 720, best"
+        description: "Quality: 2k, 1080, 720, best, audio"
         required: false
         default: "best"
 
@@ -17,107 +17,105 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Install dependencies
-        run: pip install -U yt-dlp requests beautifulsoup4
+        run: |
+          pip install -U yt-dlp requests beautifulsoup4
+          sudo apt-get install -y ffmpeg -q
 
-      - name: Fetch page and download video
+      - name: Fetch and download
         env:
           VIDEO_URL: ${{ github.event.inputs.url }}
           QUALITY: ${{ github.event.inputs.quality }}
         run: |
           python3 - << 'PYEOF'
-          import requests, re, sys, os, html as htmllib
+          import requests, re, sys, os, html as htmllib, subprocess
 
           url = os.environ["VIDEO_URL"]
           quality = os.environ.get("QUALITY", "best").lower()
 
           slug = url.rstrip("/").split("/")[-1]
-          filename = slug.replace("-", "_") + ".mp4"
+          slug = re.sub(r'[^\w\-]', '_', slug)
+          ext = "mp3" if quality == "audio" else "mp4"
+          filename = slug.replace("-", "_") + f".{ext}"
           print(f"Output filename: {filename}")
           with open("video_filename.txt", "w") as f:
               f.write(filename)
 
-          base_headers = {
-              "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
-              "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-              "Accept-Language": "en-US,en;q=0.5",
-              "Accept-Encoding": "identity",
-              "Connection": "keep-alive",
-          }
+          # YouTube and other yt-dlp supported sites
+          if quality == "audio":
+              result = subprocess.run([
+                  "yt-dlp", "-x", "--audio-format", "mp3", "--audio-quality", "0",
+                  "-o", filename, url
+              ], capture_output=True, text=True)
+              print(result.stdout)
+              print(result.stderr)
+              if result.returncode != 0:
+                  sys.exit(1)
+          elif "youtube.com" in url or "youtu.be" in url:
+              result = subprocess.run([
+                  "yt-dlp", "-f", "bestvideo+bestaudio/best",
+                  "--merge-output-format", "mp4",
+                  "-o", filename, url
+              ], capture_output=True, text=True)
+              print(result.stdout)
+              print(result.stderr)
+              if result.returncode != 0:
+                  sys.exit(1)
+          else:
+              base_headers = {
+                  "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
+                  "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                  "Accept-Language": "en-US,en;q=0.5",
+                  "Accept-Encoding": "identity",
+              }
 
-          session = requests.Session()
+              session = requests.Session()
+              from urllib.parse import urlparse
+              base_url = f"{urlparse(url).scheme}://{urlparse(url).netloc}"
+              session.get(base_url, headers=base_headers)
+              resp = session.get(url, headers={**base_headers, "Referer": base_url})
+              html = resp.text
 
-          # Determine base domain for cookie seeding
-          from urllib.parse import urlparse
-          parsed = urlparse(url)
-          base_url = f"{parsed.scheme}://{parsed.netloc}"
-          session.get(base_url, headers=base_headers)
+              video_url = None
 
-          print(f"Fetching: {url}")
-          resp = session.get(url, headers={**base_headers, "Referer": base_url})
-          html = resp.text
-          print(f"Status: {resp.status_code}, Length: {len(html)}")
+              fp = re.search(r'id="wpfp_[^"]*"[^>]*data-item="([^"]+)"', html)
+              if fp:
+                  decoded = htmllib.unescape(fp.group(1)).replace('\\/', '/')
+                  cdn = re.search(r'"src"\s*:\s*"(https?[^"]+\.mp4)"', decoded)
+                  if cdn:
+                      video_url = cdn.group(1)
+                      print(f"Found via data-item: {video_url}")
 
-          video_url = None
-
-          # Method 1: dirtyship data-item
-          fp = re.search(r'id="wpfp_[^"]*"[^>]*data-item="([^"]+)"', html)
-          if fp:
-              decoded = htmllib.unescape(fp.group(1)).replace('\\/', '/')
-              cdn = re.search(r'"src"\s*:\s*"(https?[^"]+\.mp4)"', decoded)
-              if cdn:
-                  video_url = cdn.group(1)
-                  print(f"Found via data-item: {video_url}")
-
-          # Method 2: CDN direct mp4
-          if not video_url:
-              cdn_mp4s = re.findall(r'(https?://cdn[^\s"\'<>\\]+\.mp4[^\s"\'<>\\]*)', html)
-              cdn_mp4s = [u for u in cdn_mp4s if "preview" not in u]
-              if cdn_mp4s:
-                  video_url = cdn_mp4s[0]
-                  print(f"Found via CDN: {video_url}")
-
-          # Method 3: pimpbunny get_file - try each until one works
-          if not video_url:
-              mp4_urls = re.findall(r'(https?://[^\s"\'<>]+/get_file/[^\s"\'<>]+\.mp4[^\s"\'<>\/]*)', html)
-              mp4_urls = [u for u in mp4_urls if "preview" not in u and ".jpg" not in u]
-              mp4_urls = list(dict.fromkeys(mp4_urls))
-              print(f"Found {len(mp4_urls)} get_file candidates")
-
-              for candidate in mp4_urls:
-                  r = session.get(candidate, headers={**base_headers, "Referer": url}, stream=True, allow_redirects=True)
-                  ct = r.headers.get("Content-Type", "")
-                  if r.status_code == 200 and "video" in ct:
-                      video_url = candidate
-                      print(f"Working get_file URL: {candidate.split('/')[-1]} ({r.headers.get('Content-Length','?')} bytes)")
+              if not video_url:
+                  mp4_urls = re.findall(r'(https?://[^\s"\'<>]+/get_file/[^\s"\'<>]+\.mp4[^\s"\'<>\/]*)', html)
+                  mp4_urls = [u for u in mp4_urls if "preview" not in u and ".jpg" not in u]
+                  mp4_urls = list(dict.fromkeys(mp4_urls))
+                  for candidate in mp4_urls:
+                      r = session.get(candidate, headers={**base_headers, "Referer": url}, stream=True, allow_redirects=True)
+                      if r.status_code == 200 and "video" in r.headers.get("Content-Type", ""):
+                          video_url = candidate
+                          print(f"Working: {candidate.split('/')[-1]} ({r.headers.get('Content-Length','?')} bytes)")
+                          r.close()
+                          break
                       r.close()
-                      break
-                  r.close()
 
-          if not video_url:
-              print("No video URL found")
-              sys.exit(1)
+              if not video_url:
+                  print("No video URL found")
+                  sys.exit(1)
 
-          print(f"Downloading: {video_url}")
-          r = session.get(video_url, headers={**base_headers, "Referer": url}, stream=True, allow_redirects=True)
-          print(f"Status: {r.status_code}, Type: {r.headers.get('Content-Type')}, Size: {r.headers.get('Content-Length','?')} bytes")
-
-          if r.status_code != 200 or "video" not in r.headers.get("Content-Type", ""):
-              print("Download failed")
-              sys.exit(1)
-
-          total = 0
-          with open(filename, "wb") as f:
-              for chunk in r.iter_content(chunk_size=131072):
-                  f.write(chunk)
-                  total += len(chunk)
-          print(f"Downloaded {total:,} bytes ({total/1024/1024:.1f} MB)")
+              r = session.get(video_url, headers={**base_headers, "Referer": url}, stream=True, allow_redirects=True)
+              total = 0
+              with open(filename, "wb") as f:
+                  for chunk in r.iter_content(chunk_size=131072):
+                      f.write(chunk)
+                      total += len(chunk)
+              print(f"Downloaded {total/1024/1024:.1f} MB")
           PYEOF
 
       - name: Read filename
         id: vars
         run: echo "filename=$(cat video_filename.txt)" >> $GITHUB_OUTPUT
 
-      - name: Upload video as artifact
+      - name: Upload as artifact
         uses: actions/upload-artifact@v4
         with:
           name: ${{ steps.vars.outputs.filename }}
