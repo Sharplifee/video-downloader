@@ -19,7 +19,7 @@ jobs:
     steps:
       - name: Install dependencies
         run: |
-          pip install -U yt-dlp requests beautifulsoup4 lxml cloudscraper
+          pip install -U yt-dlp requests beautifulsoup4 lxml cloudscraper curl_cffi
           sudo apt-get update -qq
           sudo apt-get install -y ffmpeg -qq
 
@@ -56,18 +56,27 @@ jobs:
           open("video_filename.txt", "w").write(filename)
 
           def make_session():
-              if HAS_CS:
-                  s = cloudscraper.create_scraper(browser={"browser": "chrome", "platform": "windows", "mobile": False})
-                  print("[session] cloudscraper")
-              else:
-                  s = requests.Session()
-                  print("[session] requests")
-              s.headers.update({
-                  "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36",
-                  "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-                  "Accept-Language": "en-US,en;q=0.9",
-                  "Referer": url,
-              })
+              s = None
+              try:
+                  from curl_cffi import requests as cfreq
+                  s = cfreq.Session(impersonate="chrome131")
+                  print("[session] curl_cffi chrome131")
+              except Exception as e:
+                  print("[session] curl_cffi unavailable:", e)
+                  if HAS_CS:
+                      s = cloudscraper.create_scraper(browser={"browser": "chrome", "platform": "windows", "mobile": False})
+                      print("[session] cloudscraper")
+                  else:
+                      s = requests.Session()
+                      print("[session] requests")
+              try:
+                  s.headers.update({
+                      "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                      "Accept-Language": "en-US,en;q=0.9",
+                      "Referer": url,
+                  })
+              except Exception:
+                  pass
               return s
 
           def download_file(session, video_url, referer=None):
@@ -105,7 +114,7 @@ jobs:
           def run_ytdlp():
               formats = ["bestvideo+bestaudio/best", "best"] if quality != "audio" else ["bestaudio/best"]
               for fmt in formats:
-                  cmd = ["yt-dlp", "--no-check-certificates", "--retries", "3", "-o", filename, "-f", fmt, "--merge-output-format", "mp4", url]
+                  cmd = ["yt-dlp", "--no-check-certificates", "--retries", "3", "-o", filename, "-f", fmt, "--merge-output-format", "mp4", "--extractor-args", "generic:impersonate", url]
                   if quality == "audio":
                       cmd = ["yt-dlp", "-x", "--audio-format", "mp3", "--audio-quality", "0", "--no-check-certificates", "-o", filename, url]
                   print(f"[yt-dlp] format={fmt}")
