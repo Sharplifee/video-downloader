@@ -4,22 +4,24 @@ on:
   workflow_dispatch:
     inputs:
       url:
-        description: "Video URL to download"
+        description: "Video page URL to download"
         required: true
         type: string
       quality:
-        description: "Quality: 2k, 1080, 720, best, audio"
+        description: "Preferred quality: best, 1080, 720, 480, audio"
         required: false
         default: "best"
 
 jobs:
   download:
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     steps:
       - name: Install dependencies
         run: |
-          pip install -U yt-dlp requests beautifulsoup4
-          sudo apt-get install -y ffmpeg -q
+          pip install -U yt-dlp requests beautifulsoup4 lxml cloudscraper
+          sudo apt-get update -qq
+          sudo apt-get install -y ffmpeg -qq
 
       - name: Fetch and download
         env:
@@ -27,93 +29,229 @@ jobs:
           QUALITY: ${{ github.event.inputs.quality }}
         run: |
           python3 - << 'PYEOF'
-          import requests, re, sys, os, html as htmllib, subprocess
+          import os, re, sys, html as htmllib, subprocess, json, time
+          from urllib.parse import urlparse, urljoin, unquote
+          import requests
+          from bs4 import BeautifulSoup
 
-          url = os.environ["VIDEO_URL"]
-          quality = os.environ.get("QUALITY", "best").lower()
+          try:
+              import cloudscraper
+              HAS_CLOUDSCRAPER = True
+          except ImportError:
+              HAS_CLOUDSCRAPER = False
 
+          url = os.environ["VIDEO_URL"].strip()
+          quality = os.environ.get("QUALITY", "best").lower().strip()
+
+          print("=" * 60)
+          print(f"INPUT URL : {url}")
+          print(f"QUALITY   : {quality}")
+          print("=" * 60)
+
+          # Clean filename from URL slug
           slug = url.rstrip("/").split("/")[-1]
-          slug = re.sub(r'[^\w\-]', '_', slug)
+          slug = re.sub(r'[^\w\-]', '_', slug)[:80]
           ext = "mp3" if quality == "audio" else "mp4"
-          filename = slug.replace("-", "_") + f".{ext}"
+          filename = f"{slug}.{ext}"
           print(f"Output filename: {filename}")
           with open("video_filename.txt", "w") as f:
               f.write(filename)
 
-          is_youtube = "youtube.com" in url or "youtu.be" in url
+          def run_ytdlp(fmt_selector):
+              cmd = [
+                  "yt-dlp",
+                  "--no-check-certificates",
+                  "--retries", "5",
+                  "--fragment-retries", "5",
+                  "--socket-timeout", "30",
+                  "--geo-bypass",
+                  "-o", filename,
+                  "--print", "after_move:filepath",
+              ]
+              if quality == "audio":
+                  cmd += ["-x", "--audio-format", "mp3", "--audio-quality", "0"]
+              else:
+                  cmd += ["-f", fmt_selector, "--merge-output-format", "mp4"]
+              cmd.append(url)
 
+              print(f"\n[yt-dlp] Trying with format: {fmt_selector}")
+              result = subprocess.run(cmd, capture_output=True, text=True, timeout=1200)
+              print(result.stdout)
+              if result.stderr:
+                  print(result.stderr[-2000:] if len(result.stderr) > 2000 else result.stderr)
+              return result.returncode == 0 and os.path.exists(filename) and os.path.getsize(filename) > 10000
+
+          # ---------- 1. Always try yt-dlp first (supports hundreds of sites) ----------
+          success = False
           if quality == "audio":
-              result = subprocess.run([
-                  "yt-dlp", "-x", "--audio-format", "mp3", "--audio-quality", "0",
-                  "--extractor-args", "youtube:player_client=ios,web",
-                  "--no-check-certificates",
-                  "-o", filename, url
-              ], capture_output=True, text=True)
-              print(result.stdout)
-              print(result.stderr)
-              if result.returncode != 0:
-                  sys.exit(1)
-          elif is_youtube:
-              result = subprocess.run([
-                  "yt-dlp", "-f", "bestvideo+bestaudio/best",
-                  "--merge-output-format", "mp4",
-                  "--extractor-args", "youtube:player_client=ios,web",
-                  "--no-check-certificates",
-                  "-o", filename, url
-              ], capture_output=True, text=True)
-              print(result.stdout)
-              print(result.stderr)
-              if result.returncode != 0:
-                  sys.exit(1)
+              success = run_ytdlp("bestaudio/best")
           else:
-              base_headers = {
-                  "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
-                  "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-                  "Accept-Language": "en-US,en;q=0.5",
-                  "Accept-Encoding": "identity",
-              }
+              # Prefer highest quality
+              for fmt in [
+                  "bestvideo[height<=2160]+bestaudio/best[height<=2160]/best",
+                  "bestvideo[height<=1080]+bestaudio/best[height<=1080]/best",
+                  "bestvideo+bestaudio/best",
+                  "best",
+              ]:
+                  if run_ytdlp(fmt):
+                      success = True
+                      break
 
+          if success:
+              size_mb = os.path.getsize(filename) / (1024 * 1024)
+              print(f"\n✅ yt-dlp succeeded → {size_mb:.1f} MB")
+              sys.exit(0)
+
+          print("\n[yt-dlp] Failed or not supported. Falling back to custom scraper...")
+
+          # ---------- 2. Custom high-power scraper for KVS / tube sites ----------
+          headers = {
+              "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36",
+              "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
+              "Accept-Language": "en-US,en;q=0.9",
+              "Accept-Encoding": "gzip, deflate, br",
+              "Referer": url,
+              "Origin": f"{urlparse(url).scheme}://{urlparse(url).netloc}",
+              "Sec-Fetch-Dest": "document",
+              "Sec-Fetch-Mode": "navigate",
+              "Sec-Fetch-Site": "same-origin",
+              "Upgrade-Insecure-Requests": "1",
+          }
+
+          session = None
+          if HAS_CLOUDSCRAPER:
+              session = cloudscraper.create_scraper(
+                  browser={"browser": "chrome", "platform": "windows", "mobile": False}
+              )
+              print("[scraper] Using cloudscraper (anti-bot)")
+          else:
               session = requests.Session()
-              from urllib.parse import urlparse
-              base_url = f"{urlparse(url).scheme}://{urlparse(url).netloc}"
-              session.get(base_url, headers=base_headers)
-              resp = session.get(url, headers={**base_headers, "Referer": base_url})
-              html = resp.text
+              print("[scraper] Using plain requests")
 
-              video_url = None
+          session.headers.update(headers)
 
-              fp = re.search(r'id="wpfp_[^"]*"[^>]*data-item="([^"]+)"', html)
-              if fp:
-                  decoded = htmllib.unescape(fp.group(1)).replace('\\/', '/')
-                  cdn = re.search(r'"src"\s*:\s*"(https?[^"]+\.mp4)"', decoded)
-                  if cdn:
-                      video_url = cdn.group(1)
-                      print(f"Found via data-item: {video_url}")
+          # Warm up
+          base = f"{urlparse(url).scheme}://{urlparse(url).netloc}"
+          try:
+              session.get(base, timeout=20)
+          except Exception as e:
+              print(f"Warm-up failed: {e}")
 
-              if not video_url:
-                  mp4_urls = re.findall(r'(https?://[^\s"\'<>]+/get_file/[^\s"\'<>]+\.mp4[^\s"\'<>\/]*)', html)
-                  mp4_urls = [u for u in mp4_urls if "preview" not in u and ".jpg" not in u]
-                  mp4_urls = list(dict.fromkeys(mp4_urls))
-                  for candidate in mp4_urls:
-                      r = session.get(candidate, headers={**base_headers, "Referer": url}, stream=True, allow_redirects=True)
-                      if r.status_code == 200 and "video" in r.headers.get("Content-Type", ""):
-                          video_url = candidate
-                          print(f"Working: {candidate.split('/')[-1]} ({r.headers.get('Content-Length','?')} bytes)")
-                          r.close()
-                          break
+          resp = session.get(url, timeout=30, allow_redirects=True)
+          resp.raise_for_status()
+          html = resp.text
+          soup = BeautifulSoup(html, "lxml")
+
+          candidates = []  # list of (url, quality_score, source)
+
+          def add_candidate(u, score, source):
+              if not u or not u.startswith("http"):
+                  return
+              u = u.replace("\\/", "/").replace("&amp;", "&")
+              # skip previews / thumbs
+              low = u.lower()
+              if any(x in low for x in ["preview", "thumb", "trailer", ".jpg", ".jpeg", ".png", ".webp", "sprite"]):
+                  return
+              candidates.append((u, score, source))
+
+          # --- Strategy A: data-item / wpfp player config (classic KVS) ---
+          for tag in soup.find_all(attrs={"data-item": True}):
+              raw = tag.get("data-item", "")
+              decoded = htmllib.unescape(raw).replace("\\/", "/")
+              # look for video sources of different qualities
+              for m in re.finditer(r'"(?:src|file|video_url|url)"\s*:\s*"(https?[^"]+\.mp4[^"]*)"', decoded, re.I):
+                  add_candidate(m.group(1), 50, "data-item")
+              # quality-specific
+              for q, score in [("2160", 100), ("1440", 90), ("1080", 80), ("720", 60), ("480", 40), ("360", 20)]:
+                  for m in re.finditer(rf'"{q}p?"\s*:\s*{{[^}}]*?"(?:src|file)"\s*:\s*"(https?[^"]+)"', decoded, re.I):
+                      add_candidate(m.group(1), score, f"data-item-{q}")
+
+          # --- Strategy B: flashvars / kt_player ---
+          for script in soup.find_all("script"):
+              txt = script.string or ""
+              if "flashvars" in txt or "kt_player" in txt or "video_url" in txt:
+                  for m in re.finditer(r'(?:video_url|file|src|url)\s*[:=]\s*[\'"](https?[^\'"]+\.mp4[^\'"]*)[\'"]', txt, re.I):
+                      add_candidate(m.group(1), 55, "flashvars")
+                  for q, score in [("1080", 85), ("720", 65), ("480", 45)]:
+                      m = re.search(rf'video_alt_url(?:{q})?\s*[:=]\s*[\'"](https?[^\'"]+)[\'"]', txt, re.I)
+                      if m:
+                          add_candidate(m.group(1), score, f"flashvars-{q}")
+
+          # --- Strategy C: direct <video> / <source> tags ---
+          for source in soup.find_all(["source", "video"]):
+              src = source.get("src") or source.get("data-src")
+              if src:
+                  add_candidate(urljoin(url, src), 40, "html5-source")
+
+          # --- Strategy D: /get_file/ pattern (very common on these sites) ---
+          get_file_urls = re.findall(r'(https?://[^\s"\'<>]+/get_file/[^\s"\'<>]+?\.(?:mp4|m3u8)[^\s"\'<>]*)', html)
+          for u in get_file_urls:
+              score = 30
+              if "1080" in u: score = 85
+              elif "720" in u: score = 65
+              elif "480" in u: score = 45
+              add_candidate(u, score, "get_file")
+
+          # --- Strategy E: generic .mp4 links in page ---
+          generic = re.findall(r'(https?://[^\s"\'<>]+\.mp4[^\s"\'<>]*)', html)
+          for u in generic:
+              add_candidate(u, 25, "generic-mp4")
+
+          # Deduplicate while keeping highest score
+          best = {}
+          for u, score, source in candidates:
+              if u not in best or score > best[u][0]:
+                  best[u] = (score, source)
+
+          ranked = sorted(best.items(), key=lambda x: x[1][0], reverse=True)
+
+          print(f"\nFound {len(ranked)} candidate video URLs:")
+          for i, (u, (score, source)) in enumerate(ranked[:8]):
+              print(f"  [{i+1}] score={score} ({source}) → {u[:120]}...")
+
+          if not ranked:
+              print("❌ No video candidates found")
+              sys.exit(1)
+
+          # Try candidates in order of quality score
+          video_url = None
+          for u, (score, source) in ranked:
+              print(f"\nTrying: {u[:100]}... (score {score})")
+              try:
+                  r = session.get(u, headers={**headers, "Referer": url}, stream=True, timeout=30, allow_redirects=True)
+                  ctype = r.headers.get("Content-Type", "").lower()
+                  cl = r.headers.get("Content-Length")
+                  if r.status_code == 200 and ("video" in ctype or "octet-stream" in ctype or (cl and int(cl) > 500000)):
+                      video_url = u
+                      print(f"✅ Working candidate ({ctype}, {cl} bytes)")
                       r.close()
+                      break
+                  r.close()
+              except Exception as e:
+                  print(f"  failed: {e}")
 
-              if not video_url:
-                  print("No video URL found")
-                  sys.exit(1)
+          if not video_url:
+              print("❌ None of the candidates were downloadable")
+              sys.exit(1)
 
-              r = session.get(video_url, headers={**base_headers, "Referer": url}, stream=True, allow_redirects=True)
-              total = 0
-              with open(filename, "wb") as f:
-                  for chunk in r.iter_content(chunk_size=131072):
+          # Download with progress
+          print(f"\nDownloading final URL:\n{video_url}")
+          r = session.get(video_url, headers={**headers, "Referer": url}, stream=True, timeout=60, allow_redirects=True)
+          r.raise_for_status()
+          total = 0
+          with open(filename, "wb") as f:
+              for chunk in r.iter_content(chunk_size=1024 * 256):
+                  if chunk:
                       f.write(chunk)
                       total += len(chunk)
-              print(f"Downloaded {total/1024/1024:.1f} MB")
+                      if total % (10 * 1024 * 1024) < 256 * 1024:
+                          print(f"  ... {total / (1024*1024):.1f} MB")
+
+          size_mb = total / (1024 * 1024)
+          print(f"\n✅ Downloaded {size_mb:.1f} MB → {filename}")
+          if size_mb < 1:
+              print("File too small, probably failed")
+              sys.exit(1)
           PYEOF
 
       - name: Read filename
@@ -125,4 +263,4 @@ jobs:
         with:
           name: ${{ steps.vars.outputs.filename }}
           path: ${{ steps.vars.outputs.filename }}
-          retention-days: 1
+          retention-days: 3
