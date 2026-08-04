@@ -29,8 +29,8 @@ jobs:
           QUALITY: ${{ github.event.inputs.quality }}
         run: |
           python3 - << 'PYEOF'
-          import os, re, sys, html as htmllib, subprocess, json, time
-          from urllib.parse import urlparse, urljoin, unquote
+          import os, re, sys, html as htmllib, subprocess, json
+          from urllib.parse import urlparse, urljoin
           import requests
           from bs4 import BeautifulSoup
 
@@ -49,8 +49,7 @@ jobs:
           print(f"QUALITY   : {quality}")
           print("=" * 60)
 
-          slug = url.rstrip("/").split("/")[-1]
-          slug = re.sub(r"[^\w\-]", "_", slug)[:80]
+          slug = re.sub(r"[^\w\-]", "_", url.rstrip("/").split("/")[-1])[:80]
           ext = "mp3" if quality == "audio" else "mp4"
           filename = f"{slug}.{ext}"
           print(f"Output filename: {filename}")
@@ -65,7 +64,7 @@ jobs:
                   print("[session] requests")
               s.headers.update({
                   "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36",
-                  "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+                  "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
                   "Accept-Language": "en-US,en;q=0.9",
                   "Referer": url,
               })
@@ -87,39 +86,95 @@ jobs:
                   raise RuntimeError("File too small")
               return True
 
-          def run_ytdlp():
-              formats = []
-              if quality == "audio":
-                  formats = ["bestaudio/best"]
+          def download_hls(m3u8_url, height=None):
+              cmd = ["yt-dlp", "--no-check-certificates", "-o", filename, "--merge-output-format", "mp4"]
+              if height and prefer_h < 9999:
+                  cmd += ["-f", f"best[height<={prefer_h}]/best"]
               else:
-                  formats = [
-                      f"bestvideo[height<={prefer_h}]+bestaudio/best[height<={prefer_h}]/best",
-                      "bestvideo+bestaudio/best",
-                      "best",
-                  ]
+                  cmd += ["-f", "best"]
+              cmd.append(m3u8_url)
+              print(f"[hls] yt-dlp {m3u8_url[:80]}...")
+              p = subprocess.run(cmd, capture_output=True, text=True, timeout=1200)
+              if p.stderr:
+                  print(p.stderr[-1200:])
+              if p.returncode == 0 and os.path.exists(filename) and os.path.getsize(filename) > 20000:
+                  print(f"✅ HLS OK → {os.path.getsize(filename)/1024/1024:.1f} MB")
+                  return True
+              return False
+
+          def run_ytdlp():
+              formats = ["bestvideo+bestaudio/best", "best"] if quality != "audio" else ["bestaudio/best"]
               for fmt in formats:
-                  cmd = [
-                      "yt-dlp", "--no-check-certificates", "--retries", "4",
-                      "--fragment-retries", "4", "--socket-timeout", "25",
-                      "--geo-bypass", "-o", filename, "-f", fmt,
-                      "--merge-output-format", "mp4", url,
-                  ]
+                  cmd = ["yt-dlp", "--no-check-certificates", "--retries", "3", "-o", filename, "-f", fmt, "--merge-output-format", "mp4", url]
                   if quality == "audio":
-                      cmd = ["yt-dlp", "-x", "--audio-format", "mp3", "--audio-quality", "0",
-                             "--no-check-certificates", "-o", filename, url]
+                      cmd = ["yt-dlp", "-x", "--audio-format", "mp3", "--audio-quality", "0", "--no-check-certificates", "-o", filename, url]
                   print(f"[yt-dlp] format={fmt}")
                   p = subprocess.run(cmd, capture_output=True, text=True, timeout=900)
-                  if p.stdout:
-                      print(p.stdout[-1500:] if len(p.stdout) > 1500 else p.stdout)
                   if p.stderr:
-                      err = p.stderr[-1500:] if len(p.stderr) > 1500 else p.stderr
-                      print(err)
+                      print(p.stderr[-1000:])
                   if p.returncode == 0 and os.path.exists(filename) and os.path.getsize(filename) > 20000:
                       print(f"✅ yt-dlp OK → {os.path.getsize(filename)/1024/1024:.1f} MB")
                       return True
               return False
 
-          # ---------- Eporner dedicated extractor ----------
+          def extract_beeg(session, page_url):
+              print("[beeg] dedicated extractor")
+              m = re.search(r"beeg\.com/(?:video/)?-?(\d+)", page_url, re.I)
+              if not m:
+                  return None
+              raw_id = m.group(1)
+              # normalize: URLs like -02213... need leading 0 stripped for API
+              video_id = raw_id.lstrip("0") or raw_id
+              if raw_id.startswith("0") and len(raw_id) > 1:
+                  video_id = raw_id.lstrip("0")
+              print(f"[beeg] id={video_id} (from {raw_id})")
+              api = f"https://store.externulls.com/facts/file/{video_id}"
+              r = session.get(api, headers={"Referer": "https://beeg.com/", "Origin": "https://beeg.com"}, timeout=25)
+              if r.status_code != 200:
+                  print(f"[beeg] API {r.status_code}: {r.text[:200]}")
+                  return None
+              data = r.json()
+              file_obj = data.get("file") or {}
+              # HLS multi playlist
+              hls = (file_obj.get("hls_resources") or {}).get("fl_cdn_multi")
+              if hls:
+                  m3u8 = f"https://video.beeg.com/{hls}"
+                  print(f"[beeg] HLS multi: {m3u8[:100]}...")
+                  if download_hls(m3u8):
+                      return "DONE"
+              # fallback direct template
+              fallback = file_obj.get("fallback") or ""
+              # qualities list
+              quals = []
+              for block in (file_obj.get("qualities") or {}).get("h264") or []:
+                  q = block.get("quality") or 0
+                  quals.append(q)
+              for fact in data.get("fc_facts") or []:
+                  for block in (fact.get("qualities") or {}).get("h264") or []:
+                      q = block.get("quality") or 0
+                      if q not in quals:
+                          quals.append(q)
+              quals = sorted(set(quals), reverse=True)
+              print(f"[beeg] qualities: {quals}")
+              # try building direct mp4 from fallback pattern if present
+              # fallback looks like: key=...,end=...,limit=3/data=.../480p/ID.mp4
+              if fallback and "data=" in fallback:
+                  base = "https://video.beeg.com/" + fallback
+                  for q in quals:
+                      if prefer_h < 9999 and q > prefer_h:
+                          continue
+                      # replace quality segment
+                      candidate = re.sub(r"/\d+p/", f"/{q}p/", base)
+                      if f"/{q}p/" not in candidate:
+                          candidate = base.replace("/480p/", f"/{q}p/")
+                      print(f"[beeg] try direct {q}p")
+                      try:
+                          download_file(session, candidate, referer="https://beeg.com/")
+                          return "DONE"
+                      except Exception as e:
+                          print(f"  fail {q}p: {e}")
+              return None
+
           def extract_eporner(session, page_url):
               print("[eporner] dedicated extractor")
               m = re.search(r"eporner\.com/(?:(?:hd-porn|embed)/|video-)([A-Za-z0-9]+)", page_url, re.I)
@@ -130,190 +185,134 @@ jobs:
               r.raise_for_status()
               html = r.text
               if "deletedfile" in html or "Video has been deleted" in html:
-                  print("[eporner] Video deleted / removed")
+                  print("[eporner] deleted")
                   return None
               hm = re.search(r'hash\s*[:=]\s*["\']([a-f0-9]{32})', html, re.I)
               if not hm:
-                  print("[eporner] no hash found")
                   return None
               vid_hash = hm.group(1)
-
               def encode_base_n(num, n, digits="0123456789abcdefghijklmnopqrstuvwxyz"):
-                  if num == 0:
-                      return digits[0]
+                  if num == 0: return digits[0]
                   s = []
                   while num:
-                      s.append(digits[num % n])
-                      num //= n
+                      s.append(digits[num % n]); num //= n
                   return "".join(reversed(s))
-
               def calc_hash(s):
                   return "".join(encode_base_n(int(s[i:i+8], 16), 36) for i in range(0, 32, 8))
-
               h = calc_hash(vid_hash)
               api = f"https://www.eporner.com/xhr/video/{video_id}"
-              params = {"hash": h, "device": "generic", "domain": "www.eporner.com", "fallback": "false"}
-              jr = session.get(api, params=params, headers={"X-Requested-With": "XMLHttpRequest", "Referer": page_url}, timeout=30)
+              jr = session.get(api, params={"hash": h, "device": "generic", "domain": "www.eporner.com", "fallback": "false"},
+                               headers={"X-Requested-With": "XMLHttpRequest", "Referer": page_url}, timeout=30)
               data = jr.json()
               if data.get("available") is False:
-                  print("[eporner] not available:", data.get("message"))
                   return None
-              sources = data.get("sources") or {}
               candidates = []
-              for kind, formats in sources.items():
-                  if not isinstance(formats, dict):
-                      continue
+              for kind, formats in (data.get("sources") or {}).items():
+                  if not isinstance(formats, dict): continue
                   for fid, fdict in formats.items():
-                      if not isinstance(fdict, dict):
-                          continue
+                      if not isinstance(fdict, dict): continue
                       src = fdict.get("src")
-                      if not src or not src.startswith("http"):
-                          continue
-                      height = 0
-                      mh = re.search(r"(\d+)p", fid, re.I)
-                      if mh:
-                          height = int(mh.group(1))
-                      candidates.append((height, src, fid, kind))
-              if not candidates:
-                  return None
+                      if not src or not src.startswith("http"): continue
+                      height = int(re.search(r"(\d+)p", fid, re.I).group(1)) if re.search(r"(\d+)p", fid, re.I) else 0
+                      candidates.append((height, src, fid))
+              if not candidates: return None
               candidates.sort(key=lambda x: x[0], reverse=True)
-              # pick best under prefer_h
-              for height, src, fid, kind in candidates:
+              for height, src, fid in candidates:
                   if height <= prefer_h or prefer_h >= 9999:
-                      print(f"[eporner] chosen {fid} ({kind}) height={height}")
+                      print(f"[eporner] {fid}")
                       return src
               return candidates[0][1]
 
-          # ---------- KVS / pimpbunny / tube sites ----------
           def extract_kvs(session, page_url):
               print("[kvs] dedicated extractor")
               r = session.get(page_url, timeout=30)
               r.raise_for_status()
               html = r.text
               soup = BeautifulSoup(html, "lxml")
-              candidates = []  # (height, url, source)
-
+              candidates = []
               def add(u, height, source):
-                  if not u or not u.startswith("http"):
-                      return
+                  if not u or not u.startswith("http"): return
                   u = u.replace("\\/", "/").replace("&amp;", "&").rstrip("/")
                   low = u.lower()
-                  if any(x in low for x in ["preview", "thumb", "trailer", ".jpg", ".png", ".webp", "sprite"]):
-                      return
-                  # normalize get_file sometimes has trailing slash
+                  if any(x in low for x in ["preview", "thumb", "trailer", ".jpg", ".png", "sprite"]): return
                   candidates.append((height or 0, u, source))
-
-              # flashvars / kt_player style
               for script in soup.find_all("script"):
                   txt = script.string or script.get_text() or ""
-                  if "video_url" not in txt and "kt_player" not in txt and "flashvars" not in txt:
-                      continue
-                  # primary
+                  if "video_url" not in txt and "kt_player" not in txt: continue
                   for m in re.finditer(r"video_url\s*:\s*['\"](https?[^'\"]+)['\"]", txt):
                       add(m.group(1), 360, "video_url")
                   for m in re.finditer(r"video_alt_url(?:\d*)\s*:\s*['\"](https?[^'\"]+)['\"]", txt):
                       h = 720
-                      if "1080" in m.group(0) or "1080" in m.group(1):
-                          h = 1080
-                      elif "720" in m.group(1):
-                          h = 720
-                      elif "480" in m.group(1):
-                          h = 480
-                      add(m.group(1), h, "video_alt_url")
-                  # text labels
-                  for m in re.finditer(r"video_alt_url(\d*)_text\s*:\s*['\"](\d+)p?['\"]", txt):
-                      pass  # already covered by url patterns
-
-              # data-item JSON
-              for tag in soup.find_all(attrs={"data-item": True}):
-                  raw = htmllib.unescape(tag.get("data-item", "")).replace("\\/", "/")
-                  for m in re.finditer(r'"(?:src|file|video_url|url)"\s*:\s*"(https?[^"]+\.mp4[^"]*)"', raw, re.I):
-                      add(m.group(1), 500, "data-item")
-                  for q, h in [("2160", 2160), ("1080", 1080), ("720", 720), ("480", 480), ("360", 360)]:
-                      for m in re.finditer(rf'"{q}[^"]*"\s*:\s*{{[^}}]*?"(?:src|file)"\s*:\s*"(https?[^"]+)"', raw, re.I):
-                          add(m.group(1), h, f"data-item-{q}")
-
-              # get_file pattern (very common)
+                      if "1080" in m.group(1): h = 1080
+                      elif "720" in m.group(1): h = 720
+                      elif "480" in m.group(1): h = 480
+                      add(m.group(1), h, "video_alt")
               for m in re.finditer(r'(https?://[^\s"\'<>]+/get_file/[^\s"\'<>]+?\.(?:mp4|m3u8)[^\s"\'<>]*)', html):
                   u = m.group(1)
-                  h = 0
-                  if "1080" in u: h = 1080
-                  elif "720" in u: h = 720
-                  elif "480" in u: h = 480
-                  elif "360" in u: h = 360
-                  elif "240" in u: h = 240
-                  else: h = 500
+                  h = 1080 if "1080" in u else (720 if "720" in u else (480 if "480" in u else 500))
                   add(u, h, "get_file")
-
-              # html5 sources
               for src_tag in soup.find_all(["source", "video"]):
                   src = src_tag.get("src") or src_tag.get("data-src")
-                  if src:
-                      add(urljoin(page_url, src), 400, "html5")
-
+                  if src: add(urljoin(page_url, src), 400, "html5")
               if not candidates:
-                  print("[kvs] no candidates")
                   return None
-
-              # dedupe by url, keep highest height
               best = {}
               for h, u, src in candidates:
                   if u not in best or h > best[u][0]:
                       best[u] = (h, src)
               ranked = sorted(((h, u, s) for u, (h, s) in best.items()), key=lambda x: x[0], reverse=True)
-              print(f"[kvs] {len(ranked)} unique candidates:")
-              for h, u, s in ranked[:6]:
-                  print(f"  {h}p  ({s})  {u[:100]}...")
-
+              print(f"[kvs] {len(ranked)} candidates")
+              for h, u, s in ranked[:5]:
+                  print(f"  {h}p ({s}) {u[:90]}...")
               for h, u, s in ranked:
-                  if prefer_h < 9999 and h > prefer_h and h != 0:
-                      continue
-                  # verify reachable
+                  if prefer_h < 9999 and h > prefer_h and h: continue
                   try:
-                      head = session.get(u, headers={"Referer": page_url}, stream=True, timeout=20, allow_redirects=True)
+                      head = session.get(u, headers={"Referer": page_url}, stream=True, timeout=15, allow_redirects=True)
                       ct = head.headers.get("Content-Type", "").lower()
                       cl = head.headers.get("Content-Length")
                       head.close()
                       if head.status_code == 200 and ("video" in ct or "octet" in ct or (cl and int(cl) > 300000)):
-                          print(f"[kvs] selected {h}p from {s}")
+                          print(f"[kvs] selected {h}p")
                           return u
                   except Exception as e:
-                      print(f"  skip {u[:60]}... {e}")
-              # last resort first ranked
-              if ranked:
-                  return ranked[0][1]
-              return None
+                      print(f"  skip: {e}")
+              return ranked[0][1] if ranked else None
 
-          # ---------- main flow ----------
           session = make_session()
           host = urlparse(url).netloc.lower()
-
-          # 1) Site-specific
           video_url = None
+
+          if "beeg.com" in host:
+              try:
+                  res = extract_beeg(session, url)
+                  if res == "DONE":
+                      sys.exit(0)
+              except Exception as e:
+                  print("[beeg] error:", e)
+
           if "eporner.com" in host:
               try:
                   video_url = extract_eporner(session, url)
               except Exception as e:
                   print("[eporner] error:", e)
-          if not video_url and any(x in host for x in ["pimpbunny", "yourlust", "dirtyship", "tubeporn", "hclips", "porntrex", "spankbang"]):
+
+          if not video_url and any(x in host for x in ["pimpbunny", "yourlust", "dirtyship", "hclips", "porntrex"]):
               try:
                   video_url = extract_kvs(session, url)
               except Exception as e:
                   print("[kvs] error:", e)
 
-          if video_url:
+          if video_url and video_url != "DONE":
               try:
                   download_file(session, video_url, referer=url)
                   sys.exit(0)
               except Exception as e:
                   print("Direct download failed:", e)
 
-          # 2) yt-dlp
           print("\n--- trying yt-dlp ---")
           if run_ytdlp():
               sys.exit(0)
 
-          # 3) Generic KVS attempt even if host unknown
           if not video_url:
               try:
                   video_url = extract_kvs(session, url)
@@ -321,7 +320,7 @@ jobs:
                       download_file(session, video_url, referer=url)
                       sys.exit(0)
               except Exception as e:
-                  print("[generic-kvs] error:", e)
+                  print("[generic-kvs]", e)
 
           print("❌ All extractors failed")
           sys.exit(1)
