@@ -237,6 +237,12 @@ jobs:
               r = session.get(page_url, timeout=30)
               r.raise_for_status()
               html = r.text
+              em = re.search(r"/embed/(\d+)", html)
+              if em:
+                  er = session.get(urljoin(page_url, f"/embed/{em.group(1)}/"), timeout=30)
+                  if er.status_code == 200:
+                      html = html + "\n" + er.text
+                      print(f"[kvs] merged embed {em.group(1)}")
               soup = BeautifulSoup(html, "lxml")
               candidates = []
               def add(u, height, source):
@@ -252,6 +258,7 @@ jobs:
                       add(m.group(1), 360, "video_url")
                   for m in re.finditer(r"video_alt_url(?:\d*)\s*:\s*['\"](https?[^'\"]+)['\"]", txt):
                       h = 720
+                      if "2160" in m.group(1) or "4k" in m.group(1).lower(): h = 2160
                       if "1080" in m.group(1): h = 1080
                       elif "720" in m.group(1): h = 720
                       elif "480" in m.group(1): h = 480
@@ -305,7 +312,7 @@ jobs:
               except Exception as e:
                   print("[eporner] error:", e)
 
-          if not video_url and any(x in host for x in ["pimpbunny", "yourlust", "dirtyship", "hclips", "porntrex"]):
+          if not video_url and any(x in host for x in ["pimpbunny", "yourlust", "dirtyship", "hclips", "porntrex", "hobby.porn"]):
               try:
                   video_url = extract_kvs(session, url)
               except Exception as e:
