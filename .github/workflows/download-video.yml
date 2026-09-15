@@ -42,7 +42,7 @@ jobs:
 
           url = os.environ["VIDEO_URL"].strip()
           quality = os.environ.get("QUALITY", "best").lower().strip()
-          prefer_h = {"best": 9999, "2160": 2160, "1080": 1080, "720": 720, "480": 480, "360": 360}.get(quality, 9999)
+          prefer_h = {"best": 9999, "2160": 2160, "1440": 1440, "1080": 1080, "720": 720, "480": 480, "360": 360}.get(quality, 9999)
 
           print("=" * 60)
           print(f"INPUT URL : {url}")
