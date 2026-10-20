@@ -8,18 +8,18 @@ on:
         required: true
         type: string
       quality:
-        description: "Preferred quality: best, 1080, 720, 480, audio"
+        description: "Preferred quality: best, 2160, 1440, 1080, 720, 480, audio"
         required: false
         default: "best"
 
 jobs:
   download:
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 30
     steps:
       - name: Install dependencies
         run: |
-          pip install -U yt-dlp requests beautifulsoup4 lxml cloudscraper curl_cffi
+          pip install -U yt-dlp requests beautifulsoup4 lxml cloudscraper curl_cffi pycryptodomex
           sudo apt-get update -qq
           sudo apt-get install -y ffmpeg -qq
 
@@ -27,9 +27,10 @@ jobs:
         env:
           VIDEO_URL: ${{ github.event.inputs.url }}
           QUALITY: ${{ github.event.inputs.quality }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           python3 - << 'PYEOF'
-          import os, re, sys, html as htmllib, subprocess, json
+          import os, re, sys, html as htmllib, subprocess, json, threading, time
           from urllib.parse import urlparse, urljoin
           import requests
           from bs4 import BeautifulSoup
@@ -49,14 +50,37 @@ jobs:
           print(f"QUALITY   : {quality}")
           print("=" * 60)
 
-          slug = re.sub(r"[^\w\-]", "_", url.rstrip("/").split("/")[-1])[:80]
+          host = urlparse(url).netloc.lower()
+
+          def site_prefix():
+              if "pornhub" in host: return "ph"
+              if "xhamster" in host: return "xh"
+              if "watchporn" in host: return "wp"
+              if "amateur8" in host: return "a8"
+              if "pimpbunny" in host: return "pb"
+              if "hqporner" in host: return "hqp"
+              if "eporner" in host: return "ep"
+              if "beeg" in host: return "beeg"
+              if "porntasia" in host: return "pt"
+              if "xxxi.porn" in host: return "xxxi"
+              return "vid"
+
+          def site_id():
+              m = re.search(r"viewkey=([A-Za-z0-9]+)", url)
+              if m: return m.group(1)
+              m = re.search(r"/(\d{4,})", url)
+              if m: return m.group(1)
+              m = re.search(r"-([A-Za-z0-9]{5,})$", url.rstrip("/"))
+              if m: return m.group(1)
+              slug = re.sub(r"[^\w\-]", "_", url.rstrip("/").split("/")[-1])[:40]
+              return slug or "clip"
+
           ext = "mp3" if quality == "audio" else "mp4"
-          filename = f"{slug}.{ext}"
+          filename = f"{site_prefix()}-{site_id()}.{ext}"
           print(f"Output filename: {filename}")
           open("video_filename.txt", "w").write(filename)
 
           def make_session():
-              s = None
               try:
                   from curl_cffi import requests as cfreq
                   s = cfreq.Session(impersonate="chrome131")
@@ -79,9 +103,87 @@ jobs:
                   pass
               return s
 
+          def remux(path):
+              if not path.endswith(".mp4"):
+                  return path
+              tmp = path + ".remux.mp4"
+              p = subprocess.run(["ffmpeg", "-y", "-i", path, "-c", "copy", "-movflags", "+faststart", tmp, "-hide_banner", "-loglevel", "error"], capture_output=True, text=True, timeout=300)
+              if p.returncode == 0 and os.path.exists(tmp) and os.path.getsize(tmp) > 20000:
+                  os.replace(tmp, path)
+                  print("[remux] faststart ok")
+              else:
+                  print("[remux] skipped:", p.stderr[-200:] if p.stderr else p.returncode)
+              return path
+
+          def download_parallel(session, video_url, referer, size):
+              # 8 workers, 8MB chunks. Hosts that throttle per connection finish much faster this way.
+              chunk = 8 * 1024 * 1024
+              ranges = []
+              s = 0
+              while s < size:
+                  e = min(s + chunk - 1, size - 1)
+                  ranges.append((s, e))
+                  s = e + 1
+              with open(filename, "wb") as f:
+                  f.truncate(size)
+              lock = threading.Lock()
+              idx = [0]
+              done = [0]
+              fails = []
+
+              def worker():
+                  while True:
+                      with lock:
+                          if idx[0] >= len(ranges):
+                              return
+                          i = idx[0]
+                          idx[0] += 1
+                      start, end = ranges[i]
+                      ok = False
+                      for attempt in range(3):
+                          try:
+                              r = session.get(video_url, headers={"Referer": referer or url, "Range": f"bytes={start}-{end}"}, timeout=90)
+                              if r.status_code in (200, 206) and len(r.content) == (end - start + 1):
+                                  with open(filename, "r+b") as f:
+                                      f.seek(start)
+                                      f.write(r.content)
+                                  with lock:
+                                      done[0] += 1
+                                      if done[0] % 8 == 0 or done[0] == len(ranges):
+                                          print(f"[parallel] {done[0]}/{len(ranges)}", flush=True)
+                                  ok = True
+                                  break
+                          except Exception as e:
+                              if attempt == 2:
+                                  fails.append((i, str(e)))
+                      if not ok:
+                          fails.append((i, "incomplete"))
+
+              threads = [threading.Thread(target=worker) for _ in range(8)]
+              for t in threads:
+                  t.start()
+              for t in threads:
+                  t.join()
+              if fails or done[0] != len(ranges):
+                  raise RuntimeError(f"parallel incomplete {done[0]}/{len(ranges)} fails={fails[:3]}")
+              return True
+
           def download_file(session, video_url, referer=None):
-              headers = {"Referer": referer or url, "User-Agent": session.headers.get("User-Agent")}
-              r = session.get(video_url, headers=headers, stream=True, timeout=90, allow_redirects=True)
+              headers = {"Referer": referer or url}
+              # probe size + range support
+              try:
+                  head = session.get(video_url, headers={**headers, "Range": "bytes=0-0"}, timeout=20, allow_redirects=True)
+                  cr = head.headers.get("Content-Range") or ""
+                  size = int(cr.split("/")[-1]) if "/" in cr else int(head.headers.get("Content-Length") or 0)
+                  if head.status_code in (200, 206) and size > 50_000_000 and "bytes" in (head.headers.get("Accept-Ranges") or "").lower() or (cr.startswith("bytes")):
+                      print(f"[download] parallel {size/1024/1024:.0f} MB")
+                      download_parallel(session, video_url, referer, size)
+                      remux(filename)
+                      print(f"✅ Downloaded {os.path.getsize(filename)/1024/1024:.1f} MB → {filename}")
+                      return True
+              except Exception as e:
+                  print(f"[parallel probe] {e}")
+              r = session.get(video_url, headers=headers, stream=True, timeout=120, allow_redirects=True)
               r.raise_for_status()
               total = 0
               with open(filename, "wb") as f:
@@ -93,239 +195,96 @@ jobs:
               print(f"✅ Downloaded {mb:.1f} MB → {filename}")
               if mb < 0.5:
                   raise RuntimeError("File too small")
+              remux(filename)
               return True
 
-          def download_hls(m3u8_url, height=None):
-              cmd = ["yt-dlp", "--no-check-certificates", "-o", filename, "--merge-output-format", "mp4"]
-              if height and prefer_h < 9999:
-                  cmd += ["-f", f"best[height<={prefer_h}]/best"]
+          def run_ytdlp(target=None):
+              # One shot. Do not list formats first — signed m3u8 URLs expire (Pornhub 410).
+              target = target or url
+              if quality == "audio":
+                  cmd = ["yt-dlp", "-x", "--audio-format", "mp3", "--audio-quality", "0", "--no-check-certificates", "-o", filename, target]
               else:
-                  cmd += ["-f", "best"]
-              cmd.append(m3u8_url)
-              print(f"[hls] yt-dlp {m3u8_url[:80]}...")
-              p = subprocess.run(cmd, capture_output=True, text=True, timeout=1200)
+                  fmt = f"best[height<={prefer_h}]/best" if prefer_h < 9999 else "best"
+                  cmd = ["yt-dlp", "--no-check-certificates", "--retries", "5", "-o", filename, "-f", fmt, "--merge-output-format", "mp4", target]
+              print(f"[yt-dlp] {cmd[cmd.index('-f')+1] if '-f' in cmd else 'audio'} {target[:80]}")
+              p = subprocess.run(cmd, capture_output=True, text=True, timeout=1800)
               if p.stderr:
-                  print(p.stderr[-1200:])
+                  print(p.stderr[-800:])
               if p.returncode == 0 and os.path.exists(filename) and os.path.getsize(filename) > 20000:
-                  print(f"✅ HLS OK → {os.path.getsize(filename)/1024/1024:.1f} MB")
+                  print(f"✅ yt-dlp OK → {os.path.getsize(filename)/1024/1024:.1f} MB")
+                  remux(filename)
                   return True
               return False
 
-          def run_ytdlp():
-              formats = ["bestvideo+bestaudio/best", "best"] if quality != "audio" else ["bestaudio/best"]
-              for fmt in formats:
-                  cmd = ["yt-dlp", "--no-check-certificates", "--retries", "3", "-o", filename, "-f", fmt, "--merge-output-format", "mp4", "--extractor-args", "generic:impersonate", url]
-                  if quality == "audio":
-                      cmd = ["yt-dlp", "-x", "--audio-format", "mp3", "--audio-quality", "0", "--no-check-certificates", "-o", filename, url]
-                  print(f"[yt-dlp] format={fmt}")
-                  p = subprocess.run(cmd, capture_output=True, text=True, timeout=2400)
-                  if p.stderr:
-                      print(p.stderr[-1000:])
-                  if p.returncode == 0 and os.path.exists(filename) and os.path.getsize(filename) > 20000:
-                      print(f"✅ yt-dlp OK → {os.path.getsize(filename)/1024/1024:.1f} MB")
-                      return True
-              return False
-
-          def extract_beeg(session, page_url):
-              print("[beeg] dedicated extractor")
-              m = re.search(r"beeg\.com/(?:video/)?-?(\d+)", page_url, re.I)
-              if not m:
-                  return None
-              raw_id = m.group(1)
-              # normalize: URLs like -02213... need leading 0 stripped for API
-              video_id = raw_id.lstrip("0") or raw_id
-              if raw_id.startswith("0") and len(raw_id) > 1:
-                  video_id = raw_id.lstrip("0")
-              print(f"[beeg] id={video_id} (from {raw_id})")
-              api = f"https://store.externulls.com/facts/file/{video_id}"
-              r = session.get(api, headers={"Referer": "https://beeg.com/", "Origin": "https://beeg.com"}, timeout=25)
-              if r.status_code != 200:
-                  print(f"[beeg] API {r.status_code}: {r.text[:200]}")
-                  return None
-              data = r.json()
-              file_obj = data.get("file") or {}
-              # HLS multi playlist
-              hls = (file_obj.get("hls_resources") or {}).get("fl_cdn_multi")
-              if hls:
-                  m3u8 = f"https://video.beeg.com/{hls}"
-                  print(f"[beeg] HLS multi: {m3u8[:100]}...")
-                  if download_hls(m3u8):
-                      return "DONE"
-              # fallback direct template
-              fallback = file_obj.get("fallback") or ""
-              # qualities list
-              quals = []
-              for block in (file_obj.get("qualities") or {}).get("h264") or []:
-                  q = block.get("quality") or 0
-                  quals.append(q)
-              for fact in data.get("fc_facts") or []:
-                  for block in (fact.get("qualities") or {}).get("h264") or []:
-                      q = block.get("quality") or 0
-                      if q not in quals:
-                          quals.append(q)
-              quals = sorted(set(quals), reverse=True)
-              print(f"[beeg] qualities: {quals}")
-              # try building direct mp4 from fallback pattern if present
-              # fallback looks like: key=...,end=...,limit=3/data=.../480p/ID.mp4
-              if fallback and "data=" in fallback:
-                  base = "https://video.beeg.com/" + fallback
-                  for q in quals:
-                      if prefer_h < 9999 and q > prefer_h:
-                          continue
-                      # replace quality segment
-                      candidate = re.sub(r"/\d+p/", f"/{q}p/", base)
-                      if f"/{q}p/" not in candidate:
-                          candidate = base.replace("/480p/", f"/{q}p/")
-                      print(f"[beeg] try direct {q}p")
-                      try:
-                          download_file(session, candidate, referer="https://beeg.com/")
-                          return "DONE"
-                      except Exception as e:
-                          print(f"  fail {q}p: {e}")
-              return None
-
-          def extract_eporner(session, page_url):
-              print("[eporner] dedicated extractor")
-              m = re.search(r"eporner\.com/(?:(?:hd-porn|embed)/|video-)([A-Za-z0-9]+)", page_url, re.I)
-              if not m:
-                  return None
-              video_id = m.group(1)
-              r = session.get(page_url, timeout=30)
-              r.raise_for_status()
-              html = r.text
-              if "deletedfile" in html or "Video has been deleted" in html:
-                  print("[eporner] deleted")
-                  return None
-              hm = re.search(r'hash\s*[:=]\s*["\']([a-f0-9]{32})', html, re.I)
-              if not hm:
-                  return None
-              vid_hash = hm.group(1)
-              def encode_base_n(num, n, digits="0123456789abcdefghijklmnopqrstuvwxyz"):
-                  if num == 0: return digits[0]
-                  s = []
-                  while num:
-                      s.append(digits[num % n]); num //= n
-                  return "".join(reversed(s))
-              def calc_hash(s):
-                  return "".join(encode_base_n(int(s[i:i+8], 16), 36) for i in range(0, 32, 8))
-              h = calc_hash(vid_hash)
-              api = f"https://www.eporner.com/xhr/video/{video_id}"
-              jr = session.get(api, params={"hash": h, "device": "generic", "domain": "www.eporner.com", "fallback": "false"},
-                               headers={"X-Requested-With": "XMLHttpRequest", "Referer": page_url}, timeout=30)
-              data = jr.json()
-              if data.get("available") is False:
-                  return None
-              candidates = []
-              for kind, formats in (data.get("sources") or {}).items():
-                  if not isinstance(formats, dict): continue
-                  for fid, fdict in formats.items():
-                      if not isinstance(fdict, dict): continue
-                      src = fdict.get("src")
-                      if not src or not src.startswith("http"): continue
-                      height = int(re.search(r"(\d+)p", fid, re.I).group(1)) if re.search(r"(\d+)p", fid, re.I) else 0
-                      candidates.append((height, src, fid))
-              if not candidates: return None
-              candidates.sort(key=lambda x: x[0], reverse=True)
-              for height, src, fid in candidates:
-                  if height <= prefer_h or prefer_h >= 9999:
-                      print(f"[eporner] {fid}")
-                      return src
-              return candidates[0][1]
-
           def extract_kvs(session, page_url):
-              print("[kvs] dedicated extractor")
+              print("[kvs] scanning get_file")
               r = session.get(page_url, timeout=30)
               r.raise_for_status()
               html = r.text
-              em = re.search(r"/embed/(\d+)", html)
-              if em:
-                  er = session.get(urljoin(page_url, f"/embed/{em.group(1)}/"), timeout=30)
-                  if er.status_code == 200:
-                      html = html + "\n" + er.text
-                      print(f"[kvs] merged embed {em.group(1)}")
-              soup = BeautifulSoup(html, "lxml")
-              candidates = []
-              def add(u, height, source):
-                  if not u or not u.startswith("http"): return
-                  u = u.replace("\\/", "/").replace("&amp;", "&").rstrip("/")
-                  low = u.lower()
-                  if any(x in low for x in ["preview", "thumb", "trailer", ".jpg", ".png", "sprite"]): return
-                  candidates.append((height or 0, u, source))
-              for script in soup.find_all("script"):
-                  txt = script.string or script.get_text() or ""
-                  if "video_url" not in txt and "kt_player" not in txt: continue
-                  for m in re.finditer(r"video_url\s*:\s*['\"](https?[^'\"]+)['\"]", txt):
-                      add(m.group(1), 360, "video_url")
-                  for m in re.finditer(r"video_alt_url(?:\d*)\s*:\s*['\"](https?[^'\"]+)['\"]", txt):
-                      h = 720
-                      if "2160" in m.group(1) or "4k" in m.group(1).lower(): h = 2160
-                      if "1080" in m.group(1): h = 1080
-                      elif "720" in m.group(1): h = 720
-                      elif "480" in m.group(1): h = 480
-                      add(m.group(1), h, "video_alt")
-              for m in re.finditer(r'(https?://[^\s"\'<>]+/get_file/[^\s"\'<>]+?\.(?:mp4|m3u8)[^\s"\'<>]*)', html):
-                  u = m.group(1)
-                  h = 1080 if "1080" in u else (720 if "720" in u else (480 if "480" in u else 500))
-                  add(u, h, "get_file")
-              for src_tag in soup.find_all(["source", "video"]):
-                  src = src_tag.get("src") or src_tag.get("data-src")
-                  if src: add(urljoin(page_url, src), 400, "html5")
-              if not candidates:
+              candidates = re.findall(r"https?://[^\"']+get_file/[^\"']+\.mp4[^\"']*", html, re.I)
+              ranked = []
+              for raw in candidates:
+                  u = htmllib.unescape(raw).replace("\\/", "/")
+                  if "preview" in u or "screenshot" in u:
+                      continue
+                  h = 0
+                  m = re.search(r"(\d{3,4})p", u)
+                  if m:
+                      h = int(m.group(1))
+                  ranked.append((h, u))
+              if not ranked:
                   return None
-              best = {}
-              for h, u, src in candidates:
-                  if u not in best or h > best[u][0]:
-                      best[u] = (h, src)
-              ranked = sorted(((h, u, s) for u, (h, s) in best.items()), key=lambda x: x[0], reverse=True)
-              print(f"[kvs] {len(ranked)} candidates")
-              for h, u, s in ranked[:5]:
-                  print(f"  {h}p ({s}) {u[:90]}...")
-              for h, u, s in ranked:
-                  if prefer_h < 9999 and h > prefer_h and h: continue
-                  try:
-                      head = session.get(u, headers={"Referer": page_url}, stream=True, timeout=15, allow_redirects=True)
-                      ct = head.headers.get("Content-Type", "").lower()
-                      cl = head.headers.get("Content-Length")
-                      head.close()
-                      if head.status_code == 200 and ("video" in ct or "octet" in ct or (cl and int(cl) > 300000)):
-                          print(f"[kvs] selected {h}p")
-                          return u
-                  except Exception as e:
-                      print(f"  skip: {e}")
-              return ranked[0][1] if ranked else None
+              ranked.sort(key=lambda x: x[0], reverse=True)
+              for h, u in ranked:
+                  if prefer_h < 9999 and h and h > prefer_h:
+                      continue
+                  print(f"[kvs] selected {h or 'default'}p")
+                  return u
+              return ranked[0][1]
 
           session = make_session()
-          host = urlparse(url).netloc.lower()
           video_url = None
 
-          if "beeg.com" in host:
-              try:
-                  res = extract_beeg(session, url)
-                  if res == "DONE":
-                      sys.exit(0)
-              except Exception as e:
-                  print("[beeg] error:", e)
+          # Fast path: sites where yt-dlp works if called immediately
+          if any(x in host for x in ["pornhub.com", "xhamster.com", "porntasia"]):
+              if run_ytdlp():
+                  sys.exit(0)
 
-          if "eporner.com" in host:
-              try:
-                  video_url = extract_eporner(session, url)
-              except Exception as e:
-                  print("[eporner] error:", e)
-
-          if not video_url and any(x in host for x in ["pimpbunny", "yourlust", "dirtyship", "hclips", "porntrex", "hobby.porn"]):
+          # Direct get_file sites
+          if any(x in host for x in ["watchporn", "amateur8", "pimpbunny", "yourlust", "dirtyship", "hclips", "porntrex", "hobby.porn"]):
               try:
                   video_url = extract_kvs(session, url)
+                  if video_url:
+                      download_file(session, video_url, referer=url)
+                      sys.exit(0)
               except Exception as e:
                   print("[kvs] error:", e)
 
-          if video_url and video_url != "DONE":
+          # HQPorner via mydaddy embed
+          if "hqporner" in host:
               try:
-                  download_file(session, video_url, referer=url)
-                  sys.exit(0)
+                  r = session.get(url, timeout=25)
+                  iframes = re.findall(r'<iframe[^>]+src=["\']([^"\']+)', r.text, re.I)
+                  md = next((i if i.startswith("http") else "https:" + i for i in iframes if "mydaddy" in i), None)
+                  if md:
+                      er = session.get(md, timeout=25, headers={"Referer": url})
+                      mp4s = re.findall(r"(?:https?:)?//[^\"']+/\d+\.mp4", er.text)
+                      best = None
+                      best_h = 0
+                      for m in mp4s:
+                          m = m if m.startswith("http") else "https:" + m
+                          hm = re.search(r"/(\d+)\.mp4", m)
+                          h = int(hm.group(1)) if hm else 0
+                          if h > best_h and (prefer_h >= 9999 or h <= prefer_h):
+                              best, best_h = m, h
+                      if best:
+                          print(f"[hqporner] {best_h}p")
+                          download_file(session, best, referer=md)
+                          sys.exit(0)
               except Exception as e:
-                  print("Direct download failed:", e)
+                  print("[hqporner] error:", e)
 
-          print("\n--- trying yt-dlp ---")
+          print("\n--- trying yt-dlp fallback ---")
           if run_ytdlp():
               sys.exit(0)
 
@@ -345,6 +304,42 @@ jobs:
       - name: Read filename
         id: vars
         run: echo "filename=$(cat video_filename.txt)" >> $GITHUB_OUTPUT
+
+      - name: Upload to release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          FILENAME: ${{ steps.vars.outputs.filename }}
+        run: |
+          python3 - << 'PYEOF'
+          import os, requests
+          token = os.environ["GH_TOKEN"]
+          name = os.environ["FILENAME"]
+          # release videos-2026-08-04
+          release_id = 364592193
+          headers = {
+              "Authorization": f"Bearer {token}",
+              "Accept": "application/vnd.github+json",
+              "X-GitHub-Api-Version": "2022-11-28",
+              "Content-Type": "application/octet-stream",
+          }
+          size = os.path.getsize(name)
+          print(f"uploading {name} {size}", flush=True)
+          with open(name, "rb") as f:
+              r = requests.post(
+                  f"https://uploads.github.com/repos/Sharplifee/video-downloader/releases/{release_id}/assets",
+                  headers=headers,
+                  params={"name": name},
+                  data=f,
+                  timeout=300,
+              )
+          print(r.status_code)
+          if r.ok:
+              print(r.json().get("browser_download_url"))
+              open("download_url.txt", "w").write(r.json().get("browser_download_url") or "")
+          else:
+              print(r.text[:400])
+              raise SystemExit(1)
+          PYEOF
 
       - name: Upload as artifact
         uses: actions/upload-artifact@v4
