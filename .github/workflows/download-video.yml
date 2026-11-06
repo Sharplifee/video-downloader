@@ -317,15 +317,26 @@ jobs:
                                       if i+1 < len(lines) and lines[i+1].endswith(".m3u8"):
                                           best_pl = lines[i+1]
                       if best_pl:
-                          if best_pl.startswith("/"):
+                          if best_pl.startswith("//"):
+                              best_pl = "https:" + best_pl
+                          elif best_pl.startswith("/"):
                               best_pl = "https://video.beeg.com" + best_pl
+                          elif not best_pl.startswith("http"):
+                              best_pl = "https://video.beeg.com/" + best_pl
                           print(f"[beeg] selected {best_h}p {best_pl[:80]}")
                           pr = session.get(best_pl, timeout=20)
                           pr.raise_for_status()
                           ts_urls = []
                           for line in pr.text.splitlines():
                               if line.endswith(".ts"):
-                                  tu = line if line.startswith("http") else "https://video.beeg.com" + line
+                                  if line.startswith("//"):
+                                      tu = "https:" + line
+                                  elif line.startswith("/"):
+                                      tu = "https://video.beeg.com" + line
+                                  elif line.startswith("http"):
+                                      tu = line
+                                  else:
+                                      tu = "https://video.beeg.com/" + line
                                   ts_urls.append(tu)
                           print(f"[beeg] {len(ts_urls)} segments")
                           with open(filename, "wb") as out:
