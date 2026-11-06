@@ -303,11 +303,8 @@ jobs:
                       # pick highest quality segment present
                       for q in ("2160p", "1080p", "720p", "480p"):
                           if f":{q}:" in raw or f"/{q}/" in raw or q in raw:
-                              m3u8_path = raw.split("/", 1)[-1] if "/" in raw else raw
-                              m3u8_path = m3u8_path.replace("_TPL_", q)
-                              if not m3u8_path.startswith("/"):
-                                  m3u8_path = "/" + m3u8_path
-                              m3u8 = "https://video.beeg.com" + m3u8_path
+                              m3u8_path = raw.replace("_TPL_", q)
+                              m3u8 = "https://video.beeg.com/" + m3u8_path.lstrip("/")
                               print(f"[beeg] {q} → {m3u8[:120]}")
                               if run_ytdlp(m3u8):
                                   sys.exit(0)
