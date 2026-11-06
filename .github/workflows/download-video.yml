@@ -289,7 +289,7 @@ jobs:
                   print("[hqporner] error:", e)
 
 
-          # Beeg: strip leading zeros, store.externulls play_url, replace _TPL_ with highest, yt-dlp the m3u8
+          # Beeg: play_url → multi m3u8 (_TPL_ intact) → highest quality playlist → session download segments
           if "beeg" in host:
               try:
                   m = re.search(r"-0*(\d+)", url)
@@ -300,15 +300,44 @@ jobs:
                       ar = session.get(api, timeout=20)
                       ar.raise_for_status()
                       raw = ar.text.strip()
-                      # pick highest quality segment present
-                      for q in ("2160p", "1080p", "720p", "480p"):
-                          if f":{q}:" in raw or f"/{q}/" in raw or q in raw:
-                              m3u8_path = raw.replace("_TPL_", q)
-                              m3u8 = "https://video.beeg.com/" + m3u8_path.lstrip("/")
-                              print(f"[beeg] {q} → {m3u8[:120]}")
-                              if run_ytdlp(m3u8):
-                                  sys.exit(0)
-                              break
+                      multi_url = "https://video.beeg.com/" + raw
+                      print(f"[beeg] multi {multi_url[:80]}")
+                      mr = session.get(multi_url, timeout=20)
+                      mr.raise_for_status()
+                      lines = mr.text.splitlines()
+                      best_h = 0
+                      best_pl = None
+                      for i, line in enumerate(lines):
+                          if "RESOLUTION=" in line:
+                              hm = re.search(r"RESOLUTION=(\d+)x(\d+)", line)
+                              if hm:
+                                  h = int(hm.group(2))
+                                  if h > best_h and (prefer_h >= 9999 or h <= prefer_h):
+                                      best_h = h
+                                      if i+1 < len(lines) and lines[i+1].endswith(".m3u8"):
+                                          best_pl = lines[i+1]
+                      if best_pl:
+                          if best_pl.startswith("/"):
+                              best_pl = "https://video.beeg.com" + best_pl
+                          print(f"[beeg] selected {best_h}p {best_pl[:80]}")
+                          pr = session.get(best_pl, timeout=20)
+                          pr.raise_for_status()
+                          ts_urls = []
+                          for line in pr.text.splitlines():
+                              if line.endswith(".ts"):
+                                  tu = line if line.startswith("http") else "https://video.beeg.com" + line
+                                  ts_urls.append(tu)
+                          print(f"[beeg] {len(ts_urls)} segments")
+                          with open(filename, "wb") as out:
+                              for i, tu in enumerate(ts_urls):
+                                  tr = session.get(tu, timeout=60)
+                                  tr.raise_for_status()
+                                  out.write(tr.content)
+                                  if (i+1) % 10 == 0 or i+1 == len(ts_urls):
+                                      print(f"[beeg] {i+1}/{len(ts_urls)}", flush=True)
+                          remux(filename)
+                          print(f"✅ Beeg {os.path.getsize(filename)/1024/1024:.1f} MB")
+                          sys.exit(0)
               except Exception as e:
                   print("[beeg] error:", e)
 
