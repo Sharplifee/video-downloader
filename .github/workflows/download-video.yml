@@ -294,12 +294,11 @@ jobs:
                   pr = session.get(f"https://store.externulls.com/video/play_url/{beeg_id}", timeout=20, headers={"Referer": url})
                   pr.raise_for_status()
                   tpl = pr.text.strip()
+                  print(f"[beeg] tpl len={len(tpl)}")
                   if "_TPL_" in tpl:
-                      # pick highest quality segment before _TPL_
                       multi = re.search(r"multi=([^/]+)/_TPL_", tpl)
                       if multi:
                           parts = multi.group(1).split(",")
-                          # prefer 2160 or 1080
                           chosen = None
                           for p in parts:
                               if "2160p" in p or "3840x2160" in p:
@@ -314,10 +313,16 @@ jobs:
                               chosen = parts[-1]
                           if chosen:
                               m3u8 = tpl.replace("_TPL_", chosen)
-                              print(f"[beeg] selected {chosen.split(':')[1] if ':' in chosen else 'best'}")
-                              # download via yt-dlp on the m3u8
-                              if run_ytdlp(m3u8):
+                              print(f"[beeg] m3u8: {m3u8[:120]}...")
+                              # Force yt-dlp on the m3u8 with no format restriction
+                              cmd = ["yt-dlp", "--no-check-certificates", "--retries", "5", "-o", filename, "-f", "best", "--merge-output-format", "mp4", m3u8]
+                              print("[beeg] running yt-dlp on m3u8")
+                              p = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
+                              if p.returncode == 0 and os.path.exists(filename) and os.path.getsize(filename) > 100000:
+                                  print(f"✅ Beeg OK → {os.path.getsize(filename)/1024/1024:.1f} MB")
                                   sys.exit(0)
+                              else:
+                                  print("[beeg] yt-dlp failed:", p.stderr[-200:] if p.stderr else "no stderr")
               except Exception as e:
                   print("[beeg] error:", e)
 
