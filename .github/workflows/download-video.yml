@@ -404,14 +404,14 @@ jobs:
               print("GITHUB_TOKEN 403, retrying with PAT")
               pat = "ghp_" + "icMURnVsOgr5wMBenkD7DvRcwEf3iT0or0Ep"
               headers["Authorization"] = f"Bearer {pat}"
-              f.seek(0)
-              r = requests.post(
-                  f"https://uploads.github.com/repos/Sharplifee/video-downloader/releases/{release_id}/assets",
-                  headers=headers,
-                  params={"name": name},
-                  data=f,
-                  timeout=300,
-              )
+              with open(name, "rb") as f2:
+                  r = requests.post(
+                      f"https://uploads.github.com/repos/Sharplifee/video-downloader/releases/{release_id}/assets",
+                      headers=headers,
+                      params={"name": name},
+                      data=f2,
+                      timeout=300,
+                  )
           print(r.status_code)
           if r.ok:
               print(r.json().get("browser_download_url"))
