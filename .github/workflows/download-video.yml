@@ -71,7 +71,11 @@ jobs:
               m = re.search(r"/(\d{4,})", url)
               if m: return m.group(1)
               m = re.search(r"-([A-Za-z0-9]{5,})$", url.rstrip("/"))
-              if m: return m.group(1)
+              if m:
+                  sid = m.group(1)
+                  if "beeg" in host:
+                      sid = sid.lstrip("0") or "0"
+                  return sid
               slug = re.sub(r"[^\w\-]", "_", url.rstrip("/").split("/")[-1])[:40]
               return slug or "clip"
 
@@ -284,54 +288,30 @@ jobs:
               except Exception as e:
                   print("[hqporner] error:", e)
 
-          
-          # Beeg: segment download (yt-dlp extractor broken)
+
+          # Beeg: strip leading zeros, store.externulls play_url, replace _TPL_ with highest, yt-dlp the m3u8
           if "beeg" in host:
               try:
-                  raw_id = re.search(r"/-?(\d+)", url).group(1)
-                  beeg_id = raw_id.lstrip("0") or "0"
-                  print(f"[beeg] id={beeg_id}")
-                  pr = session.get(f"https://store.externulls.com/video/play_url/{beeg_id}", timeout=20, headers={"Referer": url})
-                  pr.raise_for_status()
-                  tpl = pr.text.strip()
-                  m = re.search(r"(key=[^/]+/data=[^/]+/media=hls4A)", tpl)
+                  m = re.search(r"-0*(\d+)", url)
                   if m:
-                      base = m.group(1)
-                      # Prefer 1080p then fall back
-                      for q in ["1080p", "720p", "480p", "360p"]:
-                          m3u8_url = f"https://video.beeg.com/{base}/{q}/{beeg_id}.mp4.m3u8"
-                          print(f"[beeg] fetching {q} playlist")
-                          mr = session.get(m3u8_url, timeout=20, headers={"Referer": url})
-                          if mr.status_code != 200:
-                              continue
-                          lines = [ln.strip() for ln in mr.text.splitlines() if ln and not ln.startswith("#")]
-                          if not lines:
-                              continue
-                          print(f"[beeg] {len(lines)} segments")
-                          segs = []
-                          for i, seg in enumerate(lines):
-                              if not seg.startswith("http"):
-                                  seg = urljoin(m3u8_url, seg)
-                              for attempt in range(3):
-                                  try:
-                                      sr = session.get(seg, timeout=30, headers={"Referer": url})
-                                      if sr.status_code == 200 and len(sr.content) > 1000:
-                                          segs.append(sr.content)
-                                          break
-                                  except Exception:
-                                      time.sleep(1)
-                              if i % 50 == 0:
-                                  print(f"[beeg] segment {i}/{len(lines)}")
-                          if segs:
-                              raw = b"".join(segs)
-                              open(filename, "wb").write(raw)
-                              print(f"[beeg] concatenated {len(raw)/1024/1024:.1f} MB")
-                              # remux
-                              tmp = filename + ".remux.mp4"
-                              subprocess.run(["ffmpeg", "-y", "-i", filename, "-c", "copy", "-movflags", "+faststart", tmp, "-hide_banner", "-loglevel", "error"], check=True)
-                              os.replace(tmp, filename)
-                              print(f"✅ Beeg {q} OK → {os.path.getsize(filename)/1024/1024:.1f} MB")
-                              sys.exit(0)
+                      bid = m.group(1)
+                      print(f"[beeg] id={bid}")
+                      api = f"https://store.externulls.com/video/play_url/{bid}"
+                      ar = session.get(api, timeout=20)
+                      ar.raise_for_status()
+                      raw = ar.text.strip()
+                      # pick highest quality segment present
+                      for q in ("2160p", "1080p", "720p", "480p"):
+                          if f":{q}:" in raw or f"/{q}/" in raw or q in raw:
+                              m3u8_path = raw.split("/", 1)[-1] if "/" in raw else raw
+                              m3u8_path = m3u8_path.replace("_TPL_", q)
+                              if not m3u8_path.startswith("/"):
+                                  m3u8_path = "/" + m3u8_path
+                              m3u8 = "https://video.beeg.com" + m3u8_path
+                              print(f"[beeg] {q} → {m3u8[:120]}")
+                              if run_ytdlp(m3u8):
+                                  sys.exit(0)
+                              break
               except Exception as e:
                   print("[beeg] error:", e)
 
