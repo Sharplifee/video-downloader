@@ -284,36 +284,6 @@ jobs:
               except Exception as e:
                   print("[hqporner] error:", e)
 
-          
-          # Beeg: strip leading zeros, use play_url template
-          if "beeg" in host:
-              try:
-                  raw_id = re.search(r"/-?(\d+)", url).group(1)
-                  beeg_id = raw_id.lstrip("0") or "0"
-                  print(f"[beeg] id={beeg_id}")
-                  pr = session.get(f"https://store.externulls.com/video/play_url/{beeg_id}", timeout=20, headers={"Referer": url})
-                  pr.raise_for_status()
-                  tpl = pr.text.strip()
-                  # Extract base key.../media=hls4A
-                  m = re.search(r"(key=[^/]+/data=[^/]+/media=hls4A)", tpl)
-                  if m:
-                      base = m.group(1)
-                      # Try highest available
-                      for q in ["2160p", "1080p", "720p", "480p", "360p"]:
-                          m3u8 = f"https://video.beeg.com/{base}/{q}/{beeg_id}.mp4.m3u8"
-                          print(f"[beeg] trying {q}")
-                          cmd = ["yt-dlp", "--no-check-certificates", "--retries", "3", "-o", filename, "-f", "best", "--merge-output-format", "mp4", m3u8]
-                          p = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
-                          if p.returncode == 0 and os.path.exists(filename) and os.path.getsize(filename) > 200000:
-                              print(f"✅ Beeg {q} OK → {os.path.getsize(filename)/1024/1024:.1f} MB")
-                              sys.exit(0)
-                          else:
-                              print(f"[beeg] {q} failed")
-                  else:
-                      print("[beeg] no base match")
-              except Exception as e:
-                  print("[beeg] error:", e)
-
           print("\n--- trying yt-dlp fallback ---")
           if run_ytdlp():
               sys.exit(0)
