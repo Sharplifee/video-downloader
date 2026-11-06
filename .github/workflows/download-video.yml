@@ -284,6 +284,57 @@ jobs:
               except Exception as e:
                   print("[hqporner] error:", e)
 
+          
+          # Beeg: segment download (yt-dlp extractor broken)
+          if "beeg" in host:
+              try:
+                  raw_id = re.search(r"/-?(\d+)", url).group(1)
+                  beeg_id = raw_id.lstrip("0") or "0"
+                  print(f"[beeg] id={beeg_id}")
+                  pr = session.get(f"https://store.externulls.com/video/play_url/{beeg_id}", timeout=20, headers={"Referer": url})
+                  pr.raise_for_status()
+                  tpl = pr.text.strip()
+                  m = re.search(r"(key=[^/]+/data=[^/]+/media=hls4A)", tpl)
+                  if m:
+                      base = m.group(1)
+                      # Prefer 1080p then fall back
+                      for q in ["1080p", "720p", "480p", "360p"]:
+                          m3u8_url = f"https://video.beeg.com/{base}/{q}/{beeg_id}.mp4.m3u8"
+                          print(f"[beeg] fetching {q} playlist")
+                          mr = session.get(m3u8_url, timeout=20, headers={"Referer": url})
+                          if mr.status_code != 200:
+                              continue
+                          lines = [ln.strip() for ln in mr.text.splitlines() if ln and not ln.startswith("#")]
+                          if not lines:
+                              continue
+                          print(f"[beeg] {len(lines)} segments")
+                          segs = []
+                          for i, seg in enumerate(lines):
+                              if not seg.startswith("http"):
+                                  seg = urljoin(m3u8_url, seg)
+                              for attempt in range(3):
+                                  try:
+                                      sr = session.get(seg, timeout=30, headers={"Referer": url})
+                                      if sr.status_code == 200 and len(sr.content) > 1000:
+                                          segs.append(sr.content)
+                                          break
+                                  except Exception:
+                                      time.sleep(1)
+                              if i % 50 == 0:
+                                  print(f"[beeg] segment {i}/{len(lines)}")
+                          if segs:
+                              raw = b"".join(segs)
+                              open(filename, "wb").write(raw)
+                              print(f"[beeg] concatenated {len(raw)/1024/1024:.1f} MB")
+                              # remux
+                              tmp = filename + ".remux.mp4"
+                              subprocess.run(["ffmpeg", "-y", "-i", filename, "-c", "copy", "-movflags", "+faststart", tmp, "-hide_banner", "-loglevel", "error"], check=True)
+                              os.replace(tmp, filename)
+                              print(f"✅ Beeg {q} OK → {os.path.getsize(filename)/1024/1024:.1f} MB")
+                              sys.exit(0)
+              except Exception as e:
+                  print("[beeg] error:", e)
+
           print("\n--- trying yt-dlp fallback ---")
           if run_ytdlp():
               sys.exit(0)
