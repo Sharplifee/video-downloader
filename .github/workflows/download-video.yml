@@ -294,35 +294,23 @@ jobs:
                   pr = session.get(f"https://store.externulls.com/video/play_url/{beeg_id}", timeout=20, headers={"Referer": url})
                   pr.raise_for_status()
                   tpl = pr.text.strip()
-                  print(f"[beeg] tpl len={len(tpl)}")
-                  if "_TPL_" in tpl:
-                      multi = re.search(r"multi=([^/]+)/_TPL_", tpl)
-                      if multi:
-                          parts = multi.group(1).split(",")
-                          chosen = None
-                          for p in parts:
-                              if "2160p" in p or "3840x2160" in p:
-                                  chosen = p
-                                  break
-                          if not chosen:
-                              for p in parts:
-                                  if "1080p" in p or "1920x1080" in p:
-                                      chosen = p
-                                      break
-                          if not chosen and parts:
-                              chosen = parts[-1]
-                          if chosen:
-                              m3u8 = tpl.replace("_TPL_", chosen)
-                              print(f"[beeg] m3u8: {m3u8[:120]}...")
-                              # Force yt-dlp on the m3u8 with no format restriction
-                              cmd = ["yt-dlp", "--no-check-certificates", "--retries", "5", "-o", filename, "-f", "best", "--merge-output-format", "mp4", m3u8]
-                              print("[beeg] running yt-dlp on m3u8")
-                              p = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
-                              if p.returncode == 0 and os.path.exists(filename) and os.path.getsize(filename) > 100000:
-                                  print(f"✅ Beeg OK → {os.path.getsize(filename)/1024/1024:.1f} MB")
-                                  sys.exit(0)
-                              else:
-                                  print("[beeg] yt-dlp failed:", p.stderr[-200:] if p.stderr else "no stderr")
+                  # Extract base key.../media=hls4A
+                  m = re.search(r"(key=[^/]+/data=[^/]+/media=hls4A)", tpl)
+                  if m:
+                      base = m.group(1)
+                      # Try highest available
+                      for q in ["2160p", "1080p", "720p", "480p", "360p"]:
+                          m3u8 = f"https://video.beeg.com/{base}/{q}/{beeg_id}.mp4.m3u8"
+                          print(f"[beeg] trying {q}")
+                          cmd = ["yt-dlp", "--no-check-certificates", "--retries", "3", "-o", filename, "-f", "best", "--merge-output-format", "mp4", m3u8]
+                          p = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+                          if p.returncode == 0 and os.path.exists(filename) and os.path.getsize(filename) > 200000:
+                              print(f"✅ Beeg {q} OK → {os.path.getsize(filename)/1024/1024:.1f} MB")
+                              sys.exit(0)
+                          else:
+                              print(f"[beeg] {q} failed")
+                  else:
+                      print("[beeg] no base match")
               except Exception as e:
                   print("[beeg] error:", e)
 
