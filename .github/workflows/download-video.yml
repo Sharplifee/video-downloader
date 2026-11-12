@@ -369,7 +369,13 @@ jobs:
                       if mp4m:
                           video_url = mp4m.group(0)
                           print(f"[femdom] direct {video_url[:80]}")
-                          download_file(session, video_url, referer=embed)
+                          # wayshare CDN has incomplete SSL chain; use requests with verify=False
+                          import requests as reqs
+                          dl_sess = reqs.Session()
+                          dl_sess.verify = False
+                          import urllib3
+                          urllib3.disable_warnings()
+                          download_file(dl_sess, video_url, referer=embed)
                           sys.exit(0)
               except Exception as e:
                   print("[femdom] error:", e)
