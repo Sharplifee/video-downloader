@@ -354,7 +354,7 @@ jobs:
 
 
           # Femdom.zone via wayshare.cc
-          if "femdom.zone" in host or "femdomhd.org" in host:
+          if "femdom.zone" in host or "femdomhd.org" in host or "handjob-hd.net" in host:
               try:
                   r = session.get(url, timeout=30)
                   r.raise_for_status()
