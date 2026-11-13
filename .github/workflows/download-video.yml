@@ -416,10 +416,9 @@ jobs:
           FILENAME: ${{ steps.vars.outputs.filename }}
         run: |
           python3 - << 'PYEOF'
-          import os, requests, math
+          import os, requests, math, subprocess
           token = os.environ["GH_TOKEN"]
           name = os.environ["FILENAME"]
-          # release videos-2026-08-04
           release_id = 364592193
           headers = {
               "Authorization": f"Bearer {token}",
@@ -429,24 +428,26 @@ jobs:
           }
           size = os.path.getsize(name)
           print(f"file size {size} bytes", flush=True)
-          MAX = 1900000000  # under 2GB
+          MAX = 1900000000
           parts = []
-          if size > MAX:
-              n = math.ceil(size / MAX)
-              print(f"splitting into {n} parts", flush=True)
-              with open(name, "rb") as f:
-                  for i in range(n):
-                      part_name = f"{name}.part{i+1}"
-                      with open(part_name, "wb") as pf:
-                          remaining = MAX
-                          while remaining > 0:
-                              chunk = f.read(min(8*1024*1024, remaining))
-                              if not chunk:
-                                  break
-                              pf.write(chunk)
-                              remaining -= len(chunk)
-                      parts.append(part_name)
-                      print(f"wrote {part_name} {os.path.getsize(part_name)}", flush=True)
+          if size > MAX and name.endswith(".mp4"):
+              print("splitting into playable MP4 parts with ffmpeg", flush=True)
+              # get duration
+              probe = subprocess.run(["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "default=noprint_wrappers=1:nokey=1", name], capture_output=True, text=True)
+              duration = float(probe.stdout.strip() or 0)
+              if duration > 0:
+                  mid = duration / 2
+                  part1 = name.replace(".mp4", "-part1.mp4")
+                  part2 = name.replace(".mp4", "-part2.mp4")
+                  # part 1
+                  subprocess.run(["ffmpeg", "-y", "-i", name, "-t", str(mid), "-c", "copy", "-movflags", "+faststart", part1, "-hide_banner", "-loglevel", "error"], check=True)
+                  # part 2
+                  subprocess.run(["ffmpeg", "-y", "-i", name, "-ss", str(mid), "-c", "copy", "-movflags", "+faststart", part2, "-hide_banner", "-loglevel", "error"], check=True)
+                  parts = [part1, part2]
+                  print(f"part1 {os.path.getsize(part1)} part2 {os.path.getsize(part2)}", flush=True)
+              else:
+                  print("could not probe duration, falling back to binary split")
+                  parts = [name]
           else:
               parts = [name]
 
