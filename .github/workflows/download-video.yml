@@ -66,6 +66,9 @@ jobs:
               return "vid"
 
           def site_id():
+              if any(x in host for x in ["handjob-hd.net", "femdom.zone", "femdomhd.org"]):
+                  slug = re.sub(r"[^\w\-]", "_", url.rstrip("/").split("/")[-1])[:40]
+                  return slug or "clip"
               m = re.search(r"viewkey=([A-Za-z0-9]+)", url)
               if m: return m.group(1)
               m = re.search(r"/(\d{4,})", url)
