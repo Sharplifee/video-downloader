@@ -416,7 +416,7 @@ jobs:
           FILENAME: ${{ steps.vars.outputs.filename }}
         run: |
           python3 - << 'PYEOF'
-          import os, requests
+          import os, requests, math
           token = os.environ["GH_TOKEN"]
           name = os.environ["FILENAME"]
           # release videos-2026-08-04
@@ -428,34 +428,60 @@ jobs:
               "Content-Type": "application/octet-stream",
           }
           size = os.path.getsize(name)
-          print(f"uploading {name} {size}", flush=True)
-          with open(name, "rb") as f:
-              r = requests.post(
-                  f"https://uploads.github.com/repos/Sharplifee/video-downloader/releases/{release_id}/assets",
-                  headers=headers,
-                  params={"name": name},
-                  data=f,
-                  timeout=300,
-              )
-          if r.status_code == 403:
-              print("GITHUB_TOKEN 403, retrying with PAT")
-              pat = "ghp_" + "icMURnVsOgr5wMBenkD7DvRcwEf3iT0or0Ep"
-              headers["Authorization"] = f"Bearer {pat}"
-              with open(name, "rb") as f2:
+          print(f"file size {size} bytes", flush=True)
+          MAX = 1900000000  # under 2GB
+          parts = []
+          if size > MAX:
+              n = math.ceil(size / MAX)
+              print(f"splitting into {n} parts", flush=True)
+              with open(name, "rb") as f:
+                  for i in range(n):
+                      part_name = f"{name}.part{i+1}"
+                      with open(part_name, "wb") as pf:
+                          remaining = MAX
+                          while remaining > 0:
+                              chunk = f.read(min(8*1024*1024, remaining))
+                              if not chunk:
+                                  break
+                              pf.write(chunk)
+                              remaining -= len(chunk)
+                      parts.append(part_name)
+                      print(f"wrote {part_name} {os.path.getsize(part_name)}", flush=True)
+          else:
+              parts = [name]
+
+          urls = []
+          for pname in parts:
+              print(f"uploading {pname}", flush=True)
+              with open(pname, "rb") as f:
                   r = requests.post(
                       f"https://uploads.github.com/repos/Sharplifee/video-downloader/releases/{release_id}/assets",
                       headers=headers,
-                      params={"name": name},
-                      data=f2,
-                      timeout=300,
+                      params={"name": os.path.basename(pname)},
+                      data=f,
+                      timeout=600,
                   )
-          print(r.status_code)
-          if r.ok:
-              print(r.json().get("browser_download_url"))
-              open("download_url.txt", "w").write(r.json().get("browser_download_url") or "")
-          else:
-              print(r.text[:400])
-              raise SystemExit(1)
+              if r.status_code == 403:
+                  print("GITHUB_TOKEN 403, retrying with PAT")
+                  pat = "ghp_" + "icMURnVsOgr5wMBenkD7DvRcwEf3iT0or0Ep"
+                  headers["Authorization"] = f"Bearer {pat}"
+                  with open(pname, "rb") as f2:
+                      r = requests.post(
+                          f"https://uploads.github.com/repos/Sharplifee/video-downloader/releases/{release_id}/assets",
+                          headers=headers,
+                          params={"name": os.path.basename(pname)},
+                          data=f2,
+                          timeout=600,
+                      )
+              print(r.status_code)
+              if r.ok:
+                  url = r.json().get("browser_download_url")
+                  print(url)
+                  urls.append(url)
+              else:
+                  print(r.text[:400])
+                  raise SystemExit(1)
+          open("download_url.txt", "w").write("\n".join(urls))
           PYEOF
 
       - name: Upload as artifact
