@@ -82,31 +82,11 @@ jobs:
               slug = re.sub(r"[^\w\-]", "_", url.rstrip("/").split("/")[-1])[:40]
               return slug or "clip"
 
-          ext = "mp3" if quality == "audio" else "mp4"
-          # Prefer the real page title for the filename
-          def safe_title(raw):
-              t = re.sub(r"[^\w\s\-]", "", raw or "")
+          def clean_title(t):
+              t = re.sub(r"[^\w\s\-]", "", t or "")
               t = re.sub(r"\s+", "-", t.strip())
               t = re.sub(r"-+", "-", t)
-              return t[:80].strip("-") or "clip"
-          title = ""
-          try:
-              from curl_cffi import requests as cfreq
-              ts = cfreq.Session(impersonate="chrome131")
-              tr = ts.get(url, timeout=20)
-              m = re.search(r"<title>([^<]+)</title>", tr.text, re.I)
-              if m:
-                  title = m.group(1)
-                  # strip common site suffixes
-                  title = re.sub(r"\s*[-|]\s*(Watchporn|HQPorner|Pimpbunny|Beeg|Eporner|Porntrex|Whoreshub).*$", "", title, flags=re.I)
-          except Exception as e:
-              print("[title] skip:", e)
-          if title:
-              filename = f"{safe_title(title)}.{ext}"
-          else:
-              filename = f"{site_prefix()}-{site_id()}.{ext}"
-          print(f"Output filename: {filename}")
-          open("video_filename.txt", "w").write(filename)
+              return t[:80].strip("-") or "video"
 
           def make_session():
               try:
@@ -130,6 +110,36 @@ jobs:
               except Exception:
                   pass
               return s
+
+          ext = "mp3" if quality == "audio" else "mp4"
+          # Prefer actual title from page when possible
+          title_slug = None
+          try:
+              sess = make_session()
+              r = sess.get(url, timeout=20)
+              if r.ok:
+                  soup = BeautifulSoup(r.text, "html.parser")
+                  t = None
+                  if soup.title and soup.title.string:
+                      t = soup.title.string
+                  og = soup.find("meta", property="og:title")
+                  if og and og.get("content"):
+                      t = og["content"]
+                  h1 = soup.find("h1")
+                  if h1 and h1.get_text(strip=True):
+                      t = h1.get_text(strip=True)
+                  if t:
+                      title_slug = clean_title(t)
+                      print(f"[title] {title_slug}")
+          except Exception as e:
+              print("[title] fetch failed:", e)
+
+          if title_slug:
+              filename = f"{title_slug}.{ext}"
+          else:
+              filename = f"{site_prefix()}-{site_id()}.{ext}"
+          print(f"Output filename: {filename}")
+          open("video_filename.txt", "w").write(filename)
 
           def remux(path):
               if not path.endswith(".mp4"):
