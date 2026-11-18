@@ -82,34 +82,11 @@ jobs:
               slug = re.sub(r"[^\w\-]", "_", url.rstrip("/").split("/")[-1])[:40]
               return slug or "clip"
 
-          ext = "mp3" if quality == "audio" else "mp4"
-          filename = f"{site_prefix()}-{site_id()}.{ext}"
-
-          # Prefer real video title for filename
-          def safe_title(raw):
-              if not raw:
-                  return None
-              t = re.sub(r"[^\w\s\-]", "", raw)
-              t = re.sub(r"\s+", " ", t).strip()
-              return t[:90] or None
-
-          try:
-              from curl_cffi import requests as cfreq
-              _s = cfreq.Session(impersonate="chrome131")
-              _r = _s.get(url, timeout=15, headers={"Referer": url})
-              if _r.status_code == 200:
-                  m = re.search(r"<title>([^<]+)</title>", _r.text, re.I)
-                  if m:
-                      t = m.group(1)
-                      t = re.sub(r"\s*[-|]\s*(Watchporn|Pimpbunny|HQPorner|Whoreshub|Pornhub|XHamster|Beeg|ABXXX|Xozilla|Handjob|Camstreams).*", "", t, flags=re.I)
-                      title = safe_title(t)
-                      if title:
-                          filename = f"{title}.{ext}"
-          except Exception as e:
-              print("[title]", e)
-
-          print(f"Output filename: {filename}")
-          open("video_filename.txt", "w").write(filename)
+          def clean_title(t):
+              t = re.sub(r"[^\w\s\-]", "", t or "")
+              t = re.sub(r"\s+", "-", t.strip())
+              t = re.sub(r"-+", "-", t)
+              return t[:80].strip("-") or "video"
 
           def make_session():
               try:
@@ -126,13 +103,49 @@ jobs:
                       print("[session] requests")
               try:
                   s.headers.update({
-                      "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                      "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
                       "Accept-Language": "en-US,en;q=0.9",
-                      "Referer": url,
+                      "Accept-Encoding": "gzip, deflate, br",
+                      "Referer": "https://www.porntrex.com/",
+                      "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+                      "Sec-Fetch-Dest": "document",
+                      "Sec-Fetch-Mode": "navigate",
+                      "Sec-Fetch-Site": "none",
+                      "Upgrade-Insecure-Requests": "1",
                   })
               except Exception:
                   pass
               return s
+
+          ext = "mp3" if quality == "audio" else "mp4"
+          # Prefer actual title from page when possible
+          title_slug = None
+          try:
+              sess = make_session()
+              r = sess.get(url, timeout=20)
+              if r.ok:
+                  soup = BeautifulSoup(r.text, "html.parser")
+                  t = None
+                  if soup.title and soup.title.string:
+                      t = soup.title.string
+                  og = soup.find("meta", property="og:title")
+                  if og and og.get("content"):
+                      t = og["content"]
+                  h1 = soup.find("h1")
+                  if h1 and h1.get_text(strip=True):
+                      t = h1.get_text(strip=True)
+                  if t:
+                      title_slug = clean_title(t)
+                      print(f"[title] {title_slug}")
+          except Exception as e:
+              print("[title] fetch failed:", e)
+
+          if title_slug:
+              filename = f"{title_slug}.{ext}"
+          else:
+              filename = f"{site_prefix()}-{site_id()}.{ext}"
+          print(f"Output filename: {filename}")
+          open("video_filename.txt", "w").write(filename)
 
           def remux(path):
               if not path.endswith(".mp4"):
