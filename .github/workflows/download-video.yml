@@ -433,11 +433,12 @@ jobs:
                   r = session.get(url, timeout=30)
                   print(f"[viptube] status {r.status_code} len {len(r.text)}")
                   r.raise_for_status()
-                  # Look for any viptube CDN or mp4 references
-                  all_mp4 = re.findall(r'https?://[^"\'\s]+\.mp4[^"\'\s]*', r.text)
-                  gcdn = [u for u in all_mp4 if "viptube" in u or "gcdn" in u]
+                  # Look for any viptube CDN or mp4 references, including escaped
+                  text = r.text.replace("&", "&")
+                  all_mp4 = re.findall(r'https?://[^"\'\s<>]+\.mp4[^"\'\s<>]*', text)
+                  gcdn = [u for u in all_mp4 if "gcdn" in u or "viptube.com" in u]
                   print(f"[viptube] total mp4 refs {len(all_mp4)} gcdn {len(gcdn)}")
-                  for u in all_mp4[:5]:
+                  for u in all_mp4[:3]:
                       print("[viptube] sample:", u[:150])
                   if gcdn:
                       best = None
