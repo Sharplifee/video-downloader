@@ -245,11 +245,19 @@ jobs:
           def run_ytdlp(target=None):
               # One shot. Do not list formats first — signed m3u8 URLs expire (Pornhub 410).
               target = target or url
+              extra = []
+              if "pornhub.com" in target:
+                  # Age gate + better headers to avoid redirection errors
+                  extra = [
+                      "--add-header", "Cookie: age_verified=1; platform=pc",
+                      "--user-agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+                      "--referer", "https://www.pornhub.com/",
+                  ]
               if quality == "audio":
-                  cmd = ["yt-dlp", "-x", "--audio-format", "mp3", "--audio-quality", "0", "--no-check-certificates", "-o", filename, target]
+                  cmd = ["yt-dlp", "-x", "--audio-format", "mp3", "--audio-quality", "0", "--no-check-certificates", "-o", filename] + extra + [target]
               else:
                   fmt = f"best[height<={prefer_h}]/best" if prefer_h < 9999 else "best"
-                  cmd = ["yt-dlp", "--no-check-certificates", "--retries", "5", "-o", filename, "-f", fmt, "--merge-output-format", "mp4", target]
+                  cmd = ["yt-dlp", "--no-check-certificates", "--retries", "5", "-o", filename, "-f", fmt, "--merge-output-format", "mp4"] + extra + [target]
               print(f"[yt-dlp] {cmd[cmd.index('-f')+1] if '-f' in cmd else 'audio'} {target[:80]}")
               p = subprocess.run(cmd, capture_output=True, text=True, timeout=1800)
               if p.stderr:
