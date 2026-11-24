@@ -433,19 +433,26 @@ jobs:
                   r = session.get(url, timeout=30)
                   print(f"[viptube] status {r.status_code} len {len(r.text)}")
                   r.raise_for_status()
-                  mp4s = re.findall(r'https://gcdn\.viptube\.com/[^"\'\s]+\.mp4[^"\'\s]*', r.text)
-                  print(f"[viptube] found {len(mp4s)} mp4s")
-                  if mp4s:
+                  # Look for any viptube CDN or mp4 references
+                  all_mp4 = re.findall(r'https?://[^"\'\s]+\.mp4[^"\'\s]*', r.text)
+                  gcdn = [u for u in all_mp4 if "viptube" in u or "gcdn" in u]
+                  print(f"[viptube] total mp4 refs {len(all_mp4)} gcdn {len(gcdn)}")
+                  if gcdn:
                       best = None
-                      for m in mp4s:
+                      for m in gcdn:
                           if "mp4_hq" in m or not best:
                               best = m
                       if best:
                           print(f"[viptube] selected {best[:120]}")
                           download_file(session, best, referer=url)
                           sys.exit(0)
-                  else:
-                      print("[viptube] no gcdn links found")
+                  # Fallback: look in scripts for video config
+                  scripts = re.findall(r'<script[^>]*>(.*?)</script>', r.text, re.S)
+                  for sc in scripts:
+                      if "mp4" in sc or "video_url" in sc or "get_file" in sc:
+                          print("[viptube] script snippet:", sc[:300].replace("\n"," "))
+                          break
+                  print("[viptube] no usable links found")
               except Exception as e:
                   print("[viptube] error:", e)
 
