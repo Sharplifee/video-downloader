@@ -437,6 +437,8 @@ jobs:
                   all_mp4 = re.findall(r'https?://[^"\'\s]+\.mp4[^"\'\s]*', r.text)
                   gcdn = [u for u in all_mp4 if "viptube" in u or "gcdn" in u]
                   print(f"[viptube] total mp4 refs {len(all_mp4)} gcdn {len(gcdn)}")
+                  for u in all_mp4[:5]:
+                      print("[viptube] sample:", u[:150])
                   if gcdn:
                       best = None
                       for m in gcdn:
