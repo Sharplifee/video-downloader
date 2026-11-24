@@ -426,6 +426,25 @@ jobs:
               except Exception as e:
                   print("[wayshare] error:", e)
 
+          # Viptube: direct gcdn.viptube.com MP4 links
+          if "viptube.com" in host:
+              try:
+                  r = session.get(url, timeout=25)
+                  r.raise_for_status()
+                  mp4s = re.findall(r'https://gcdn\.viptube\.com/[^"\']+\.mp4[^"\']*', r.text)
+                  if mp4s:
+                      # Prefer highest quality (no speed limit or higher)
+                      best = None
+                      for m in mp4s:
+                          if "mp4_hq" in m or not best:
+                              best = m
+                      if best:
+                          print(f"[viptube] {best[:100]}")
+                          download_file(session, best, referer=url)
+                          sys.exit(0)
+              except Exception as e:
+                  print("[viptube] error:", e)
+
           print("\n--- trying yt-dlp fallback ---")
           if run_ytdlp():
               sys.exit(0)
