@@ -247,11 +247,15 @@ jobs:
               target = target or url
               extra = []
               if "pornhub.com" in target:
-                  # Age gate + better headers to avoid redirection errors
                   extra = [
                       "--add-header", "Cookie: age_verified=1; platform=pc",
                       "--user-agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
                       "--referer", "https://www.pornhub.com/",
+                  ]
+              if "pornhoarder" in target:
+                  extra = [
+                      "--extractor-args", "generic:impersonate",
+                      "--user-agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
                   ]
               if quality == "audio":
                   cmd = ["yt-dlp", "-x", "--audio-format", "mp3", "--audio-quality", "0", "--no-check-certificates", "-o", filename] + extra + [target]
